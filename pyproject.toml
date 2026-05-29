@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logix-mcp"
+version = "0.1.0"
+description = "Offline-first MCP and extractor for Studio 5000 Logix Designer L5X exports."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Adrian Acurero" }]
+dependencies = [
+  "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+logix-mcp = "logix_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

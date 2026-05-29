@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Logix project files can contain sensitive plant logic and network details.
+*.ACD
+*.L5X
+*.L5K
+*.AML
+*.RDF
+
+# Generated analysis workspaces.
+*.logix/
+logix-workspace/
+workspaces/
