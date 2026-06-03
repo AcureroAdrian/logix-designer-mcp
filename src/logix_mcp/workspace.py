@@ -398,7 +398,7 @@ def _write_ai_files(workspace: Path, project: dict) -> None:
         routines_dir = program_dir / "routines"
         routines_dir.mkdir(exist_ok=True)
         for routine in program.get("routines", []):
-            (routines_dir / f"{_safe_name(routine['name'])}.md").write_text(_routine_md(routine, project), encoding="utf-8")
+            _write_routine_ai_files(routines_dir, routine, project)
 
     for udt in project["data_types"]:
         (workspace / "ai" / "udts" / f"{_safe_name(udt['name'])}.md").write_text(_udt_md(udt), encoding="utf-8")
@@ -412,7 +412,7 @@ def _write_ai_files(workspace: Path, project: dict) -> None:
         routines_dir = aoi_dir / "routines"
         routines_dir.mkdir(exist_ok=True)
         for routine in aoi.get("routines", []):
-            (routines_dir / f"{_safe_name(routine['name'])}.md").write_text(_routine_md(routine, project), encoding="utf-8")
+            _write_routine_ai_files(routines_dir, routine, project)
         (workspace / "ai" / "aois" / f"{_safe_name(aoi['name'])}.md").write_text(_aoi_summary_md(aoi), encoding="utf-8")
 
     (workspace / "ai" / "modules" / "modules.md").write_text(_modules_md(project["modules"]), encoding="utf-8")
@@ -426,6 +426,13 @@ def _write_ai_files(workspace: Path, project: dict) -> None:
         (module_dir / "io_points.md").write_text(_module_io_points_md([row for row in project["module_io_points"] if row.get("module") == name]), encoding="utf-8")
 
     (workspace / "ai" / "alarms" / "alarms.md").write_text(_alarms_md(project["alarms"]), encoding="utf-8")
+
+
+def _write_routine_ai_files(routines_dir: Path, routine: dict, project: dict) -> None:
+    safe = _safe_name(routine["name"])
+    refs = [row for row in project["xrefs"] if row.get("routine") == routine["id"]]
+    (routines_dir / f"{safe}.md").write_text(_routine_md(routine, project), encoding="utf-8")
+    (routines_dir / f"{safe}.references.md").write_text(_xrefs_reference_md(routine, refs), encoding="utf-8")
 
 
 def _overview_md(project: dict) -> str:
@@ -501,6 +508,8 @@ def _routine_md(routine: dict, project: dict) -> str:
     sfc_nodes = [row for row in project["sfc_nodes"] if row.get("routine_id") == rid]
     sfc_links = [row for row in project["sfc_links"] if row.get("routine_id") == rid]
     refs = [row for row in project["xrefs"] if row.get("routine") == rid]
+    writers = sorted({row.get("symbol") for row in refs if row.get("access") in {"write", "read_write"} and row.get("symbol")})[:25]
+    readers = sorted({row.get("symbol") for row in refs if row.get("access") == "read" and row.get("symbol")})[:25]
     lines = [
         f"# Routine: {routine['name']}",
         "",
@@ -511,6 +520,13 @@ def _routine_md(routine: dict, project: dict) -> str:
         f"| Language | {routine.get('language') or ''} |",
         f"| Units | {len(units)} |",
         f"| XRefs | {len(refs)} |",
+        "",
+        "## Analysis Summary",
+        "",
+        f"- Primary writers: {', '.join(writers) if writers else 'None extracted'}",
+        f"- Primary readers: {', '.join(readers) if readers else 'None extracted'}",
+        "- Use `cross_reference`, `get_routine_slice`, and `trace_signal` for compact evidence before reading full IR/Markdown.",
+        f"- Full routine references moved to `{_safe_name(routine['name'])}.references.md`.",
         "",
     ]
     if routine.get("description"):
@@ -528,7 +544,17 @@ def _routine_md(routine: dict, project: dict) -> str:
     else:
         lines.extend(["## Body", "", "```text", routine.get("body") or "", "```", ""])
 
-    lines.extend(_xrefs_md(refs[:200], truncated=len(refs) > 200))
+    return "\n".join(lines) + "\n"
+
+
+def _xrefs_reference_md(routine: dict, refs: list[dict]) -> str:
+    lines = [
+        f"# Routine References: {routine['name']}",
+        "",
+        "Generated cross-reference view. Prefer the MCP/CLI `cross_reference` tool for paginated, filtered output.",
+        "",
+    ]
+    lines.extend(_xrefs_md(refs[:1000], truncated=len(refs) > 1000))
     return "\n".join(lines) + "\n"
 
 

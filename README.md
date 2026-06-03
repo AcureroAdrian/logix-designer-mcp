@@ -76,6 +76,25 @@ graph tools read from it through indexes (with a JSONL fallback for older
 workspaces), so reference, routine-context, and impact lookups stay fast on large
 projects.
 
+## Compact Analysis CLI
+
+When the MCP server is not connected, use the CLI before reading large `ir/` or
+`ai/` files:
+
+```powershell
+python -m logix_mcp search .\Arnold_0057_022_052226.logix "gland pump" --limit 10
+python -m logix_mcp exists .\Arnold_0057_022_052226.logix "DP1.Blower[2]"
+python -m logix_mcp operand .\Arnold_0057_022_052226.logix "UWP.Permit.COOLING"
+python -m logix_mcp routine-slice .\Arnold_0057_022_052226.logix --program DP1 --routine R08_AUX_MOTOR --sheet 3
+python -m logix_mcp xref .\Arnold_0057_022_052226.logix "Motor_Run" --mode members --destructive
+python -m logix_mcp trace .\Arnold_0057_022_052226.logix "Motor_Run"
+python -m logix_mcp triage .\Arnold_0057_022_052226.logix "Blower 3 will not run in auto DP1"
+```
+
+These commands return bounded JSON with snippets and evidence references. Use
+`rg` for repository source code, extractor bugs, or proving missing evidence;
+do not use it as the first pass over generated industrial artifacts.
+
 ## MCP Tools
 
 - `project_summary()`
@@ -100,7 +119,14 @@ projects.
 - `get_entity(entity_id)`
 - `search_entities(pattern, limit=50)`
 - `search_logic(pattern, limit=50)`
+- `search_project(query, kinds=None, scope=None, limit=20, offset=0)`
+- `exists(query, kinds=None, scope=None)`
+- `get_operand_context(operand, scope=None, detail="summary")`
+- `get_routine_slice(program=None, routine=None, routine_id=None, sheet=None, unit_id=None, query=None, before=1, after=1)`
+- `cross_reference(symbol, mode="exact", access=None, destructive=None, scope=None, limit=50, offset=0)`
 - `find_references(symbol, limit=200)`
+- `trace_signal(symbol, direction="upstream", max_depth=4, limit=100)`
+- `triage_issue(issue_text, limit=5)`
 
 ### Analysis
 

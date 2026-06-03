@@ -19,3 +19,6 @@ build/
 *.logix/
 logix-workspace/
 workspaces/
+
+# Local scratch outputs.
+$out

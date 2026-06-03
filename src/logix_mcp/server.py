@@ -11,6 +11,15 @@ from .graph import (
     io_trace as graph_io_trace,
     tag_producers_consumers as graph_tag_producers_consumers,
 )
+from .intelligence import (
+    cross_reference as analysis_cross_reference,
+    exists as analysis_exists,
+    get_operand_context as analysis_get_operand_context,
+    get_routine_slice as analysis_get_routine_slice,
+    search_project as analysis_search_project,
+    trace_signal as analysis_trace_signal,
+    triage_issue as analysis_triage_issue,
+)
 from .workspace import (
     get_aoi_bundle,
     get_entity as workspace_get_entity,
@@ -160,8 +169,67 @@ def create_server(workspace: str | Path):
         return search_logic_rows(workspace_path, pattern, limit)
 
     @mcp.tool()
+    def search_project(query: str, kinds: str | None = None, scope: str | None = None, limit: int = 20, offset: int = 0) -> dict:
+        """Compact FTS-backed project search with bounded snippets."""
+
+        return analysis_search_project(workspace_path, query, kinds=kinds, scope=scope, limit=limit, offset=offset)
+
+    @mcp.tool()
+    def exists(query: str, kinds: str | None = None, scope: str | None = None) -> dict:
+        """Cheap existence check over project search."""
+
+        return analysis_exists(workspace_path, query, kinds=kinds, scope=scope)
+
+    @mcp.tool()
+    def get_operand_context(operand: str, scope: str | None = None, detail: str = "summary") -> dict:
+        """Compact context for a tag/member operand, references, comments, and data preview."""
+
+        return analysis_get_operand_context(workspace_path, operand, scope=scope, detail=detail)
+
+    @mcp.tool()
+    def get_routine_slice(
+        program: str | None = None,
+        routine: str | None = None,
+        routine_id: str | None = None,
+        sheet: str | None = None,
+        unit_id: str | None = None,
+        query: str | None = None,
+        before: int = 1,
+        after: int = 1,
+    ) -> dict:
+        """Return a bounded routine slice by sheet/unit/query."""
+
+        return analysis_get_routine_slice(workspace_path, program, routine, routine_id, sheet, unit_id, query, before, after)
+
+    @mcp.tool()
+    def cross_reference(
+        symbol: str,
+        mode: str = "exact",
+        access: str | None = None,
+        destructive: bool | None = None,
+        scope: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Logix-style cross reference with destructive classification and snippets."""
+
+        return analysis_cross_reference(workspace_path, symbol, mode=mode, access=access, destructive=destructive, scope=scope, limit=limit, offset=offset)
+
+    @mcp.tool()
     def find_references(symbol: str, limit: int = 200) -> list[dict]:
         return workspace_find_references(workspace_path, symbol, limit)
+
+    @mcp.tool()
+    def trace_signal(symbol: str, direction: str = "upstream", max_depth: int = 4, limit: int = 100) -> dict:
+        """Trace a signal through compact writers/readers and first-pass FBD flow."""
+
+        return analysis_trace_signal(workspace_path, symbol, direction=direction, max_depth=max_depth, limit=limit)
+
+    @mcp.tool()
+    def triage_issue(issue_text: str, limit: int = 5) -> dict:
+        """PLC-first evidence bundle for a field issue description."""
+
+        return analysis_triage_issue(workspace_path, issue_text, limit=limit)
 
     @mcp.tool()
     def tag_producers_consumers(name: str) -> dict:

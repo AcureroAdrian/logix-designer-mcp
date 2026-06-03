@@ -99,6 +99,32 @@ def test_extract_fbd_units_include_sheets_nodes_wires_textboxes_aoi_calls_and_xr
     json.dumps(routine_ir_from_element(routine, routine_id="Program:Main.Routine:FbdLogic"))
 
 
+def test_extract_fbd_units_include_named_connectors():
+    routine = _xml(
+        """
+        <Routine Name="FbdLogic" Type="FBD">
+          <FBDContent>
+            <Sheet Number="1">
+              <IRef ID="0" X="100" Y="120" Operand="StartPB"/>
+              <OCon ID="10" X="220" Y="120" Name="StartNet"/>
+              <ICon ID="11" X="320" Y="120" Name="StartNet"/>
+              <ORef ID="1" X="620" Y="120" Operand="MotorRun"/>
+              <Wire FromID="0" ToID="10"/>
+              <Wire FromID="11" ToID="1"/>
+            </Sheet>
+          </FBDContent>
+        </Routine>
+        """
+    )
+
+    units = extract_fbd_units(routine, routine_id="Program:Main.Routine:FbdLogic")
+    nodes = {node["node_type"]: node for node in units[0]["nodes"]}
+
+    assert nodes["OCon"]["connector_name"] == "StartNet"
+    assert nodes["ICon"]["connector_name"] == "StartNet"
+    assert any(node["instruction"] == "StartNet" for node in units[0]["nodes"] if node["node_type"] in {"ICon", "OCon"})
+
+
 def test_extract_sfc_units_include_steps_actions_transitions_branches_links_and_internal_st():
     routine = _xml(
         """

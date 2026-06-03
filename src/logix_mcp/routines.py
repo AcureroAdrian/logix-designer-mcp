@@ -16,7 +16,7 @@ from .xrefs import (
 
 JsonDict = dict[str, Any]
 
-FBD_NODE_ELEMENTS = {"IRef", "ORef", "Block", "AddOnInstruction", "TextBox"}
+FBD_NODE_ELEMENTS = {"IRef", "ORef", "ICon", "OCon", "Block", "AddOnInstruction", "TextBox"}
 SFC_NODE_ELEMENTS = {"Step", "Transition", "Action", "Branch"}
 
 
@@ -440,6 +440,7 @@ def _fbd_node(
             "id_on_sheet": node_id,
             "instruction": elem.attrib.get("Type") or elem.attrib.get("Name") or node_type,
             "operand": elem.attrib.get("Operand"),
+            "connector_name": elem.attrib.get("Name") if node_type in {"ICon", "OCon"} else None,
             "visible_pins": elem.attrib.get("VisiblePins"),
             "x": elem.attrib.get("X"),
             "y": elem.attrib.get("Y"),
@@ -601,6 +602,8 @@ def _fbd_node_text(node: JsonDict) -> str:
         parts.append(f"instruction={node['instruction']}")
     if node.get("operand"):
         parts.append(f"operand={node['operand']}")
+    if node.get("connector_name"):
+        parts.append(f"connector={node['connector_name']}")
     if node.get("visible_pins"):
         parts.append(f"pins={node['visible_pins']}")
     for array in node.get("arrays", []):

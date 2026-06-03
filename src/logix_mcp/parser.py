@@ -498,7 +498,7 @@ def _source_nodes(root: ET.Element, counts: dict[str, int]) -> list[JsonDict]:
 def _coverage(root: ET.Element, project: JsonDict, counts: dict[str, int]) -> JsonDict:
     fbd_source_nodes = _descendant_counts(root, "FBDContent")
     sfc_source_nodes = _descendant_counts(root, "SFCContent")
-    fbd_node_source = sum(fbd_source_nodes[name] for name in ["IRef", "ORef", "Block", "AddOnInstruction", "TextBox"])
+    fbd_node_source = sum(fbd_source_nodes[name] for name in ["IRef", "ORef", "ICon", "OCon", "Block", "AddOnInstruction", "TextBox"])
     sfc_node_source = sum(sfc_source_nodes[name] for name in ["Step", "Transition", "Action", "Branch"])
     rung_comment_count = sum(1 for unit in project["routine_units"] if unit.get("kind") == "rll_rung" and unit.get("comment"))
     aoi_routine_count = sum(1 for routine in project["routines"] if str(routine.get("owner") or "").startswith("AOI:"))

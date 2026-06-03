@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "logix-mcp-arnold": {
+      "command": "python",
+      "args": [
+        "-m",
+        "logix_mcp",
+        "serve",
+        ".\\Arnold_0057_022_052226.logix"
+      ]
+    }
+  }
+}
