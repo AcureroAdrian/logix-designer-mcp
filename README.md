@@ -86,9 +86,14 @@ python -m logix_mcp search .\Arnold_0057_022_052226.logix "gland pump" --limit 1
 python -m logix_mcp exists .\Arnold_0057_022_052226.logix "DP1.Blower[2]"
 python -m logix_mcp operand .\Arnold_0057_022_052226.logix "UWP.Permit.COOLING"
 python -m logix_mcp routine-slice .\Arnold_0057_022_052226.logix --program DP1 --routine R08_AUX_MOTOR --sheet 3
+python -m logix_mcp fbd-sheet .\Arnold_0057_022_052226.logix --program DP1 --routine R08_AUX_MOTOR --sheet 3
 python -m logix_mcp xref .\Arnold_0057_022_052226.logix "Motor_Run" --mode members --destructive
 python -m logix_mcp trace .\Arnold_0057_022_052226.logix "Motor_Run"
 python -m logix_mcp triage .\Arnold_0057_022_052226.logix "Blower 3 will not run in auto DP1"
+python -m logix_mcp scope .\Arnold_0057_022_052226.logix "HMI shows red with breaker off"
+python -m logix_mcp resolve-alarm .\Arnold_0057_022_052226.logix "DP2_GLAND_PUMP_SUMMARY_ALARM"
+python -m logix_mcp decode-summary .\Arnold_0057_022_052226.logix "DP2_GLAND_PUMP_SUMMARY_ALARM"
+python -m logix_mcp aoi-bindings .\Arnold_0057_022_052226.logix "MCC_Type1_Starter_03"
 ```
 
 These commands return bounded JSON with snippets and evidence references. Use
@@ -123,10 +128,15 @@ do not use it as the first pass over generated industrial artifacts.
 - `exists(query, kinds=None, scope=None)`
 - `get_operand_context(operand, scope=None, detail="summary")`
 - `get_routine_slice(program=None, routine=None, routine_id=None, sheet=None, unit_id=None, query=None, before=1, after=1)`
+- `get_fbd_sheet(program=None, routine=None, routine_id=None, sheet=None, form="pseudo", limit=100)`
 - `cross_reference(symbol, mode="exact", access=None, destructive=None, scope=None, limit=50, offset=0)`
 - `find_references(symbol, limit=200)`
 - `trace_signal(symbol, direction="upstream", max_depth=4, limit=100)`
 - `triage_issue(issue_text, limit=5)`
+- `scope_metadata(issue_text=None)`
+- `resolve_alarm(name_or_class, limit=10)`
+- `decode_summary(tag, limit=50)`
+- `aoi_instance_bindings(instance, limit=10)`
 
 ### Analysis
 

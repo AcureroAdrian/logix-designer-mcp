@@ -7,11 +7,16 @@ import json
 from pathlib import Path
 
 from .intelligence import (
+    aoi_instance_bindings,
     cross_reference,
+    decode_summary,
     exists,
+    get_fbd_sheet,
     get_operand_context,
     get_routine_slice,
+    resolve_alarm,
     search_project,
+    scope_metadata,
     trace_signal,
     triage_issue,
 )
@@ -64,6 +69,15 @@ def build_parser() -> argparse.ArgumentParser:
     routine_slice.add_argument("--before", type=int, default=1)
     routine_slice.add_argument("--after", type=int, default=1)
 
+    fbd_sheet = sub.add_parser("fbd-sheet", help="Compact pseudo-equation view of one FBD sheet.")
+    fbd_sheet.add_argument("workspace", type=Path)
+    fbd_sheet.add_argument("--program", default=None)
+    fbd_sheet.add_argument("--routine", default=None)
+    fbd_sheet.add_argument("--routine-id", default=None)
+    fbd_sheet.add_argument("--sheet", default=None)
+    fbd_sheet.add_argument("--form", choices=["pseudo", "summary"], default="pseudo")
+    fbd_sheet.add_argument("--limit", type=int, default=100)
+
     xref = sub.add_parser("xref", help="Logix-style compact cross reference.")
     xref.add_argument("workspace", type=Path)
     xref.add_argument("symbol")
@@ -85,6 +99,25 @@ def build_parser() -> argparse.ArgumentParser:
     triage.add_argument("workspace", type=Path)
     triage.add_argument("issue_text", nargs="+")
     triage.add_argument("--limit", type=int, default=5)
+
+    scope = sub.add_parser("scope", help="Describe in-scope/offline evidence and likely limits.")
+    scope.add_argument("workspace", type=Path)
+    scope.add_argument("issue_text", nargs="*")
+
+    resolve = sub.add_parser("resolve-alarm", help="Resolve alarm records to source tags and PLC evidence.")
+    resolve.add_argument("workspace", type=Path)
+    resolve.add_argument("name_or_class")
+    resolve.add_argument("--limit", type=int, default=10)
+
+    summary = sub.add_parser("decode-summary", help="Expand a summary coil/tag into member bits and alarms.")
+    summary.add_argument("workspace", type=Path)
+    summary.add_argument("tag")
+    summary.add_argument("--limit", type=int, default=50)
+
+    bindings = sub.add_parser("aoi-bindings", help="Return FBD AOI instance pin bindings.")
+    bindings.add_argument("workspace", type=Path)
+    bindings.add_argument("instance")
+    bindings.add_argument("--limit", type=int, default=10)
 
     return parser
 
@@ -132,6 +165,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    if args.command == "fbd-sheet":
+        _print(
+            get_fbd_sheet(
+                args.workspace,
+                program=args.program,
+                routine=args.routine,
+                routine_id=args.routine_id,
+                sheet=args.sheet,
+                form=args.form,
+                limit=args.limit,
+            )
+        )
+        return 0
     if args.command == "xref":
         _print(
             cross_reference(
@@ -151,6 +197,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "triage":
         _print(triage_issue(args.workspace, " ".join(args.issue_text), limit=args.limit))
+        return 0
+    if args.command == "scope":
+        _print(scope_metadata(args.workspace, " ".join(args.issue_text) if args.issue_text else None))
+        return 0
+    if args.command == "resolve-alarm":
+        _print(resolve_alarm(args.workspace, args.name_or_class, limit=args.limit))
+        return 0
+    if args.command == "decode-summary":
+        _print(decode_summary(args.workspace, args.tag, limit=args.limit))
+        return 0
+    if args.command == "aoi-bindings":
+        _print(aoi_instance_bindings(args.workspace, args.instance, limit=args.limit))
         return 0
     parser.error("unknown command")
     return 2

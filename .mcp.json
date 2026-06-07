@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "logix-mcp-arnold": {
+    "logix-mcp": {
       "command": "python",
       "args": [
         "-m",

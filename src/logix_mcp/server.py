@@ -12,11 +12,16 @@ from .graph import (
     tag_producers_consumers as graph_tag_producers_consumers,
 )
 from .intelligence import (
+    aoi_instance_bindings as analysis_aoi_instance_bindings,
     cross_reference as analysis_cross_reference,
+    decode_summary as analysis_decode_summary,
     exists as analysis_exists,
+    get_fbd_sheet as analysis_get_fbd_sheet,
     get_operand_context as analysis_get_operand_context,
     get_routine_slice as analysis_get_routine_slice,
+    resolve_alarm as analysis_resolve_alarm,
     search_project as analysis_search_project,
+    scope_metadata as analysis_scope_metadata,
     trace_signal as analysis_trace_signal,
     triage_issue as analysis_triage_issue,
 )
@@ -202,6 +207,19 @@ def create_server(workspace: str | Path):
         return analysis_get_routine_slice(workspace_path, program, routine, routine_id, sheet, unit_id, query, before, after)
 
     @mcp.tool()
+    def get_fbd_sheet(
+        program: str | None = None,
+        routine: str | None = None,
+        routine_id: str | None = None,
+        sheet: str | None = None,
+        form: str = "pseudo",
+        limit: int = 100,
+    ) -> dict:
+        """Return compact pseudo-equations for one FBD sheet."""
+
+        return analysis_get_fbd_sheet(workspace_path, program=program, routine=routine, routine_id=routine_id, sheet=sheet, form=form, limit=limit)
+
+    @mcp.tool()
     def cross_reference(
         symbol: str,
         mode: str = "exact",
@@ -230,6 +248,30 @@ def create_server(workspace: str | Path):
         """PLC-first evidence bundle for a field issue description."""
 
         return analysis_triage_issue(workspace_path, issue_text, limit=limit)
+
+    @mcp.tool()
+    def scope_metadata(issue_text: str | None = None) -> dict:
+        """Describe in-scope offline PLC evidence and out-of-scope HMI/runtime limits."""
+
+        return analysis_scope_metadata(workspace_path, issue_text)
+
+    @mcp.tool()
+    def resolve_alarm(name_or_class: str, limit: int = 10) -> dict:
+        """Resolve alarm records to source tags, messages, and PLC evidence."""
+
+        return analysis_resolve_alarm(workspace_path, name_or_class, limit=limit)
+
+    @mcp.tool()
+    def decode_summary(tag: str, limit: int = 50) -> dict:
+        """Expand a summary coil/tag into candidate member bits and alarms."""
+
+        return analysis_decode_summary(workspace_path, tag, limit=limit)
+
+    @mcp.tool()
+    def aoi_instance_bindings(instance: str, limit: int = 10) -> dict:
+        """Return FBD AOI instance pin bindings, including unwired parameters."""
+
+        return analysis_aoi_instance_bindings(workspace_path, instance, limit=limit)
 
     @mcp.tool()
     def tag_producers_consumers(name: str) -> dict:

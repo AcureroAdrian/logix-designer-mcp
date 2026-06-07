@@ -125,10 +125,24 @@ fuente del repo.
 - `get_routine_slice(program=None, routine=None, routine_id=None, sheet=None,
   unit_id=None, query=None, before=1, after=1)` para leer solo una hoja, rung,
   unidad o vecindario.
+- `get_fbd_sheet(program=None, routine=None, routine_id=None, sheet=None,
+  form="pseudo", limit=100)` para convertir una hoja FBD visual en
+  pseudo-ecuaciones compactas, conectores `ICon/OCon`, AOI pins y `UNWIRED`
+  explicitos antes de leer nodos/wires crudos.
 - `trace_signal(symbol, direction="upstream", max_depth=4, limit=100)` para
-  rastreo compacto PLC-first, incluyendo FBD wires y conectores cuando existan.
+  rastreo compacto PLC-first, incluyendo pseudo-ecuaciones FBD, wires y
+  conectores cuando existan.
 - `triage_issue(issue_text, limit=5)` para convertir un item de campo en tags
   candidatos, evidencia, limites y siguientes llamadas.
+- `scope_metadata(issue_text=None)` para saber que evidencia esta dentro del
+  workspace offline (`.L5X`, SQLite, FBD/SFC, alarmas) y que requiere HMI export,
+  runtime/live PLC o controladores/gateways externos.
+- `resolve_alarm(name_or_class, limit=10)` para alarma -> tags asociados ->
+  mensajes -> evidencia PLC y limites ("no trip logic found", HMI substitution).
+- `decode_summary(tag, limit=50)` para expandir una bobina/tag resumen en bits
+  miembro, comentarios y alarmas relacionadas.
+- `aoi_instance_bindings(instance, limit=10)` para tabla AOI `param | usage |
+  wired | argument/sources/destinations`, incluyendo pines requeridos sin cablear.
 - `search_entities(pattern)` para encontrar entidades por texto.
 - `get_entity(entity_id)` si ya tienes un ID.
 - `get_tag_context(name, scope=None)` para tag + comentarios + datos + refs.
@@ -151,7 +165,9 @@ fuente del repo.
 1. Usa `get_routine_context(program="DP1", routine="R10_VACON_COMM")`.
 2. Revisa `routine.language`.
 3. Para RLL, leer `units` por rung y preservar `comment`.
-4. Para FBD, usar `fbd_nodes` y `fbd_wires`; no asumir orden textual lineal.
+4. Para FBD, usar primero `get_fbd_sheet(..., form="pseudo")`; si hay que
+   auditar la extraccion, entonces revisar `fbd_nodes` y `fbd_wires`. No asumir
+   orden textual lineal.
 5. Para SFC, usar `sfc_nodes`, `sfc_links`, acciones y condiciones ST.
 6. Completa con `xrefs` para entradas/salidas y writes.
 
@@ -164,6 +180,27 @@ fuente del repo.
 5. `impact_of(name)` si hay que saber blast radius.
 6. Si el resultado es ambiguo, validar con `get_routine_slice(..., query=name)`
    y solo entonces leer IR/Markdown completo.
+
+### Resolver alarmas y resumenes
+
+1. `resolve_alarm(name_or_class)` para ubicar alarma, severidad, mensajes y tags
+   asociados.
+2. Si el tag parece resumen (`*_SUMMARY_ALARM`, `*_ALM_*`, OR coil), usar
+   `decode_summary(tag)`.
+3. Para AOIs involucradas, usar `aoi_instance_bindings(instance)` antes de leer
+   una hoja FBD completa; revisar `required_unwired`.
+4. Si aparece `needs_hmi_export_or_runtime` o `message_uses_hmi_or_alarm_server_substitution`,
+   reportar ese limite explicitamente.
+
+### Problemas HMI/runtime o fuera de alcance
+
+1. Usa `scope_metadata(issue_text)` antes de concluir causas cuando el problema
+   mencione pantalla, color rojo/verde, MCC/HMI, breaker fisico, lentitud,
+   runtime, GE engine/genset, ProSoft, gateway o equipos externos.
+2. Si la respuesta incluye `needs_hmi_export_or_runtime`,
+   `needs_runtime_or_field_state` o `may_depend_on_external_controller_or_gateway`,
+   separa evidencia PLC probada de lo que requiere export HMI, valores online o
+   informacion externa.
 
 ### Analizar un modulo o punto I/O
 
