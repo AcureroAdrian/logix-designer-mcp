@@ -17,6 +17,9 @@ READ = "read"
 WRITE = "write"
 READ_WRITE = "read_write"
 CALL = "call"
+# Rung label operands (JMP/LBL) are jump targets, not tags; they are dropped
+# from the cross-reference output entirely.
+LABEL = "label"
 
 # Map an AOI parameter Usage to the access mode of the argument supplied to it.
 USAGE_ACCESS = {"Input": READ, "Output": WRITE, "InOut": READ_WRITE}
@@ -123,11 +126,20 @@ INSTRUCTION_SIGNATURES: dict[str, tuple[tuple[str, ...], str | None]] = {
     "SSV": _sig(READ, READ, READ, READ),
     "IOT": _sig(READ_WRITE),
     "EOT": _sig(READ),
+    # --- Alarms (1756-RM003: the instruction drives the alarm tag's status) ---
+    "ALMD": _sig(READ_WRITE, READ, READ, READ, READ),  # ALMD(Tag, ProgAck, ProgReset, ProgDisable, ProgEnable)
+    "ALMA": _sig(READ_WRITE, READ, READ, READ, READ, READ),  # ALMA(Tag, In, ProgAck, ProgReset, ProgDisable, ProgEnable)
+    # --- Array / misc ---
+    "SIZE": _sig(READ, READ, WRITE),  # SIZE(Source, Dim, Size)
     # --- Program control ---
     "JSR": _sig(CALL, rest=READ_WRITE),
     "FOR": _sig(CALL, READ_WRITE, READ, READ, READ),
     "SBR": _sig(rest=WRITE),
     "RET": _sig(rest=READ),
+    "JMP": _sig(LABEL),
+    "LBL": _sig(LABEL),
+    "SFR": _sig(CALL, READ),  # SFR(SFCRoutine, Step)
+    "SFP": _sig(CALL, READ),  # SFP(SFCRoutine, TargetState)
 }
 
 ST_KEYWORDS = {
@@ -214,11 +226,18 @@ def extract_rll_references(
         # operands are literals (e.g. BTD bit counts) or whole expressions (e.g.
         # a CPT expression). Each argument's role is then applied to every tag it
         # contains.
-        for classified in classify_ladder_instruction(op, args, aoi_signatures):
+        for index, classified in enumerate(classify_ladder_instruction(op, args, aoi_signatures)):
             access = str(classified["access"])
+            if access == LABEL:
+                continue
             confidence = str(classified.get("confidence", "heuristic"))
             for symbol in extract_tag_references(str(classified["operand"]), include_calls=False):
                 refs.append(_ref(symbol, routine_id, access, op, confidence=confidence))
+                if index == 0 and op in ("ALMD", "ALMA"):
+                    # The alarm instruction sets the tag's status members; expose
+                    # .InAlarm as a write so traces and producer queries connect
+                    # alarm logic to the members the rest of the program reads.
+                    refs.append(_ref(f"{symbol}.InAlarm", routine_id, WRITE, op, confidence="typed"))
     return _dedupe_refs(refs)
 
 

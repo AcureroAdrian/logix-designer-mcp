@@ -32,7 +32,14 @@ def ingest_l5x(l5x_path: str | Path, out_dir: str | Path | None = None, copy_sou
     _write_json(workspace / "ir" / "project.json", summary)
     _write_json(workspace / "ir" / "coverage.json", project["coverage"])
     _write_json(workspace / "ir" / "device_tree.json", project["device_tree"])
-    for name, rows in _jsonl_datasets(project).items():
+    datasets = _jsonl_datasets(project)
+    # Re-ingesting must not leave stale datasets from older schema versions
+    # behind (e.g. the removed data_values.jsonl duplicate).
+    expected = {f"{name}.jsonl" for name in datasets}
+    for stale in (workspace / "ir").glob("*.jsonl"):
+        if stale.name not in expected:
+            stale.unlink()
+    for name, rows in datasets.items():
         _write_jsonl(workspace / "ir" / f"{name}.jsonl", rows)
     _write_ai_files(workspace, project)
     _write_sqlite(workspace / "index" / "logix.sqlite", project)
@@ -351,7 +358,6 @@ def _jsonl_datasets(project: dict) -> dict[str, list[dict]]:
         "comments": project["comments"],
         "tag_comments": project["tag_comments"],
         "tag_data": project["tag_data"],
-        "data_values": project["tag_data"],
         "alarms": project["alarms"],
         "messages": project["messages"],
         "produce_consume": project["produce_consume"],
@@ -743,7 +749,7 @@ def _write_sqlite(path: Path, project: dict) -> None:
         conn.execute("CREATE TABLE symbols (id TEXT PRIMARY KEY, kind TEXT, name TEXT, scope TEXT, data_type TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE routines (id TEXT PRIMARY KEY, program TEXT, owner TEXT, name TEXT, language TEXT, body TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE routine_units (id TEXT PRIMARY KEY, routine_id TEXT, kind TEXT, program TEXT, text TEXT, json TEXT NOT NULL)")
-        conn.execute("CREATE TABLE xrefs (symbol TEXT, base_symbol TEXT, routine TEXT, access TEXT, instruction TEXT, source TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE xrefs (symbol TEXT, base_symbol TEXT, routine TEXT, program TEXT, access TEXT, instruction TEXT, source TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE entities (id TEXT, kind TEXT, name TEXT, scope TEXT, data_type TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE comments (id TEXT, kind TEXT, target TEXT, text TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE data_values (id TEXT, owner_name TEXT, element TEXT, format TEXT, raw_text TEXT, json TEXT NOT NULL)")
@@ -763,6 +769,9 @@ def _write_sqlite(path: Path, project: dict) -> None:
         conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", ("coverage", json.dumps(project["coverage"], ensure_ascii=False)))
         _insert_sqlite_rows(conn, project)
         _create_sqlite_indexes(conn)
+        conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION}")
+        conn.execute("ANALYZE")
+        conn.execute("PRAGMA optimize")
         conn.commit()
     finally:
         conn.close()
@@ -772,9 +781,13 @@ def _create_sqlite_indexes(conn: sqlite3.Connection) -> None:
     """Create indexes after bulk insert so the MCP query layer stays fast."""
 
     for statement in [
-        "CREATE INDEX idx_xrefs_symbol ON xrefs(symbol)",
-        "CREATE INDEX idx_xrefs_base ON xrefs(base_symbol)",
+        # The query layer compares symbol/base_symbol/comment targets with
+        # COLLATE NOCASE; the indexes must share that collation or SQLite
+        # falls back to full table scans.
+        "CREATE INDEX idx_xrefs_symbol ON xrefs(symbol COLLATE NOCASE)",
+        "CREATE INDEX idx_xrefs_base ON xrefs(base_symbol COLLATE NOCASE)",
         "CREATE INDEX idx_xrefs_routine ON xrefs(routine)",
+        "CREATE INDEX idx_xrefs_program ON xrefs(program)",
         "CREATE INDEX idx_edges_source ON edges(source)",
         "CREATE INDEX idx_edges_target ON edges(target)",
         "CREATE INDEX idx_edges_kind ON edges(kind)",
@@ -784,7 +797,7 @@ def _create_sqlite_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX idx_symbols_kind ON symbols(kind)",
         "CREATE INDEX idx_entities_id ON entities(id)",
         "CREATE INDEX idx_entities_kind ON entities(kind)",
-        "CREATE INDEX idx_comments_target ON comments(target)",
+        "CREATE INDEX idx_comments_target ON comments(target COLLATE NOCASE)",
         "CREATE INDEX idx_data_values_owner ON data_values(owner_name)",
         "CREATE INDEX idx_alarms_tag ON alarms(tag_name)",
         "CREATE INDEX idx_modules_parent ON modules(parent_module)",
@@ -816,8 +829,8 @@ def _insert_sqlite_rows(conn: sqlite3.Connection, project: dict) -> None:
         _insert_search(conn, unit.get("kind"), unit.get("routine"), unit.get("program") or unit.get("owner"), _search_text(unit))
     for ref in project["xrefs"]:
         conn.execute(
-            "INSERT INTO xrefs(symbol, base_symbol, routine, access, instruction, source, json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (ref.get("symbol"), ref.get("base_symbol"), ref.get("routine"), ref.get("access"), ref.get("instruction"), ref.get("source"), _json(ref)),
+            "INSERT INTO xrefs(symbol, base_symbol, routine, program, access, instruction, source, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (ref.get("symbol"), ref.get("base_symbol"), ref.get("routine"), ref.get("program"), ref.get("access"), ref.get("instruction"), ref.get("source"), _json(ref)),
         )
     for entity in project["entities"]:
         conn.execute(

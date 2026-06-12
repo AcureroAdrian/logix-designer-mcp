@@ -34,7 +34,6 @@ from .workspace import (
     find_references as workspace_find_references,
     find_routine,
     find_symbol,
-    ingest_l5x,
     inspect_workspace,
     query_entities,
     query_symbols,
@@ -44,29 +43,131 @@ from .workspace import (
 )
 
 
+SUMMARY_TEXT_LIMIT = 200
+_BULKY_FIELDS = {"body", "attributes"}
+
+# Per-kind whitelists keep listing rows lean enough that a default page of 200
+# stays within the context budget; kinds without a whitelist fall back to the
+# generic scalar projection.
+_KIND_SUMMARY_KEYS = {
+    "tag": ("id", "kind", "name", "scope", "data_type", "tag_type", "alias_for", "comment_count"),
+    "udt": ("id", "kind", "name", "family", "class", "members_count"),
+    "aoi": ("id", "kind", "name", "revision", "parameters_count", "local_tags_count", "routines_count"),
+    "module": ("id", "kind", "name", "catalog_number", "parent_module", "slot", "address", "inhibited", "major_fault"),
+    "program": ("id", "kind", "name", "main_routine"),
+    "routine": ("id", "kind", "name", "program", "owner", "language", "unit_count", "fbd_node_count", "sfc_node_count"),
+}
+
+
+def summarize_row(row: dict) -> dict:
+    """Project a row to its scalar fields; lists collapse to ``<key>_count``.
+
+    Raw IR rows can embed full routine bodies, member trees, or node lists; a
+    default listing must never serialize those (a default ``list_routines()``
+    used to return 2.8M characters).
+    """
+
+    summary: dict = {}
+    for key, value in row.items():
+        if key in _BULKY_FIELDS:
+            continue
+        if isinstance(value, str):
+            summary[key] = value if len(value) <= SUMMARY_TEXT_LIMIT else value[:SUMMARY_TEXT_LIMIT] + "..."
+        elif isinstance(value, (int, float, bool)):
+            summary[key] = value
+        elif isinstance(value, list):
+            summary[f"{key}_count"] = len(value)
+    keys = _KIND_SUMMARY_KEYS.get(str(row.get("kind") or ""))
+    if keys:
+        return {key: summary[key] for key in keys if key in summary}
+    return summary
+
+
+def envelope(rows: list[dict], limit: int, offset: int = 0, detail: str = "summary") -> dict:
+    """Uniform collection envelope: items, total, has_more, truncated."""
+
+    total = len(rows)
+    offset = max(int(offset or 0), 0)
+    limit = max(int(limit or 0), 0)
+    page = rows[offset : offset + limit]
+    items = list(page) if detail == "full" else [summarize_row(row) for row in page]
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(page) < total,
+        "truncated": max(0, total - offset - len(page)),
+    }
+
+
+def probe_envelope(rows: list[dict], limit: int, offset: int = 0, detail: str = "summary") -> dict:
+    """Envelope for helpers that only fetched ``offset + limit + 1`` rows.
+
+    The extra probed row makes ``has_more`` reliable, but the true total is
+    unknown, so it is reported as ``None`` instead of a number that would lie.
+    """
+
+    offset = max(int(offset or 0), 0)
+    limit = max(int(limit or 0), 0)
+    has_more = len(rows) > offset + limit
+    result = envelope(rows[: offset + limit], limit, offset, detail)
+    result["has_more"] = has_more
+    result["total"] = None
+    result["truncated"] = None
+    return result
+
+
+def suggest_names(workspace: str | Path, name: str, kind: str | None = None, limit: int = 5) -> list[str]:
+    from . import db
+
+    try:
+        if not db.has_index(workspace):
+            return []
+        with db.connect(workspace) as conn:
+            params: list = [f"%{name.lower()}%"]
+            sql = "SELECT DISTINCT name FROM symbols WHERE lower(name) LIKE ?"
+            if kind:
+                sql += " AND kind = ?"
+                params.append(kind)
+            sql += " ORDER BY length(name) LIMIT ?"
+            params.append(limit)
+            return [row["name"] for row in conn.execute(sql, params) if row["name"]]
+    except Exception:
+        return []
+
+
+def not_found(workspace: str | Path, kind: str, name: str) -> dict:
+    return {
+        "found": False,
+        "kind": kind,
+        "name": name,
+        "did_you_mean": suggest_names(workspace, name, kind=kind),
+        "hint": "Try search_project(<name>) or exists(<name>); program scopes accept 'UWP' or 'Program:UWP'.",
+    }
+
+
 def create_server(workspace: str | Path):
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
         raise RuntimeError("The MCP server requires the 'mcp' package. Install with: pip install -e .") from exc
 
+    from mcp.types import ToolAnnotations
+
     workspace_path = Path(workspace).resolve()
     mcp = FastMCP("logix-mcp")
 
-    @mcp.tool()
-    def load_project(path: str, out: str | None = None) -> dict:
-        """Ingest an L5X file and make the generated workspace current."""
+    # Every tool is a read-only query over the ingested workspace; ingestion is
+    # CLI-only (`python -m logix_mcp ingest`) so the MCP surface cannot write.
+    def _tool():
+        return mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 
-        nonlocal workspace_path
-        result = ingest_l5x(path, out)
-        workspace_path = Path(result["workspace"]).resolve()
-        return result["project"]
-
-    @mcp.tool()
+    @_tool()
     def project_summary() -> dict:
         return inspect_workspace(workspace_path)
 
-    @mcp.tool()
+    @_tool()
     def coverage_report() -> dict:
         """Return extraction coverage counts and missing P0/P1 surfaces."""
 
@@ -77,121 +178,205 @@ def create_server(workspace: str | Path):
 
         return json.loads(coverage_path.read_text(encoding="utf-8"))
 
-    @mcp.tool()
-    def list_tags(scope: str | None = None, data_type: str | None = None, limit: int = 200) -> list[dict]:
+    @_tool()
+    def list_tags(scope: str | None = None, data_type: str | None = None, limit: int = 100, offset: int = 0) -> dict:
+        """List tags as summary rows: {items, total, has_more, truncated}."""
+
         rows = [row for row in read_jsonl(workspace_path, "symbols.jsonl") if row.get("kind") == "tag"]
         if scope:
             rows = [row for row in rows if row.get("scope") == scope]
         if data_type:
             rows = [row for row in rows if row.get("data_type") == data_type]
-        return rows[:limit]
+        return envelope(rows, limit, offset)
 
-    @mcp.tool()
-    def get_tag(name: str, scope: str | None = None) -> dict | None:
+    @_tool()
+    def get_tag(name: str, scope: str | None = None) -> dict:
         row = find_symbol(workspace_path, name, scope)
-        return row if row and row.get("kind") == "tag" else None
+        if row and row.get("kind") == "tag":
+            return row
+        return not_found(workspace_path, "tag", name)
 
-    @mcp.tool()
-    def get_tag_context(name: str, scope: str | None = None) -> dict | None:
+    @_tool()
+    def get_tag_context(name: str, scope: str | None = None) -> dict:
         """Return a tag with descriptions/comments, data/defaults, and references."""
 
-        return get_tag_bundle(workspace_path, name, scope)
+        bundle = get_tag_bundle(workspace_path, name, scope)
+        return bundle if bundle else not_found(workspace_path, "tag", name)
 
-    @mcp.tool()
-    def list_udts(limit: int = 200) -> list[dict]:
-        return query_symbols(workspace_path, kind="udt", limit=limit)
+    @_tool()
+    def list_udts(limit: int = 200, offset: int = 0) -> dict:
+        """List UDTs as summary rows; use get_udt(name) for members."""
 
-    @mcp.tool()
-    def get_udt(name: str) -> dict | None:
+        rows = query_symbols(workspace_path, kind="udt", limit=1_000_000)
+        return envelope(rows, limit, offset)
+
+    @_tool()
+    def get_udt(name: str, detail: str = "summary") -> dict:
+        """One UDT with projected members; detail='full' returns the raw row."""
+
         row = find_symbol(workspace_path, name)
-        return row if row and row.get("kind") == "udt" else None
+        if not row or row.get("kind") != "udt":
+            return not_found(workspace_path, "udt", name)
+        if detail == "full":
+            return row
+        summary = summarize_row(row)
+        summary["members"] = [
+            {key: member.get(key) for key in ("name", "data_type", "dimension", "radix", "description") if member.get(key) not in (None, "")}
+            for member in (row.get("members") or [])[:250]
+        ]
+        return summary
 
-    @mcp.tool()
-    def list_programs() -> list[dict]:
-        return query_symbols(workspace_path, kind="program", limit=1000)
+    @_tool()
+    def list_programs(limit: int = 200, offset: int = 0) -> dict:
+        rows = query_symbols(workspace_path, kind="program", limit=1_000_000)
+        return envelope(rows, limit, offset)
 
-    @mcp.tool()
-    def get_program(name: str) -> dict | None:
+    @_tool()
+    def get_program(name: str) -> dict:
         row = find_symbol(workspace_path, name)
-        return row if row and row.get("kind") == "program" else None
+        if row and row.get("kind") == "program":
+            return row
+        return not_found(workspace_path, "program", name)
 
-    @mcp.tool()
-    def list_routines(program: str | None = None, limit: int = 200) -> list[dict]:
+    @_tool()
+    def list_routines(program: str | None = None, limit: int = 100, offset: int = 0) -> dict:
+        """List routines as summary rows (no bodies); use get_routine_slice for logic."""
+
         rows = read_jsonl(workspace_path, "routines.jsonl")
         if program:
             rows = [row for row in rows if row.get("program") == program]
-        return rows[:limit]
+        return envelope(rows, limit, offset)
 
-    @mcp.tool()
-    def get_routine(program: str, routine: str) -> dict | None:
-        return find_routine(workspace_path, program, routine)
+    @_tool()
+    def get_routine(program: str, routine: str) -> dict:
+        row = find_routine(workspace_path, program, routine)
+        return row if row else not_found(workspace_path, "routine", routine)
 
-    @mcp.tool()
-    def get_routine_context(program: str | None = None, routine: str | None = None, routine_id: str | None = None) -> dict | None:
-        """Return a routine with rung/ST/FBD/SFC units, graph rows, and xrefs."""
+    @_tool()
+    def get_routine_context(
+        program: str | None = None,
+        routine: str | None = None,
+        routine_id: str | None = None,
+        detail: str = "summary",
+        unit_limit: int = 100,
+    ) -> dict:
+        """Routine overview with bounded unit list.
 
-        return workspace_get_routine_context(workspace_path, program, routine, routine_id)
+        detail='summary' (default) returns the routine row, dataset counts, and
+        clipped unit texts; detail='full' returns raw units/fbd/sfc rows and can
+        be very large for FBD routines - prefer get_fbd_sheet/get_routine_slice.
+        """
 
-    @mcp.tool()
-    def list_aois(limit: int = 200) -> list[dict]:
-        return query_symbols(workspace_path, kind="aoi", limit=limit)
+        result = workspace_get_routine_context(workspace_path, program, routine, routine_id)
+        if result is None:
+            return not_found(workspace_path, "routine", routine or routine_id or program or "")
+        if detail == "full":
+            return result
+        units = result.get("units") or []
+        unit_limit = max(int(unit_limit or 0), 1)
+        unit_rows = []
+        for unit in units[:unit_limit]:
+            row = {key: unit.get(key) for key in ("id", "kind", "number", "sequence") if unit.get(key) is not None}
+            for text_key in ("comment", "text"):
+                value = unit.get(text_key)
+                if isinstance(value, str) and value:
+                    row[text_key] = value if len(value) <= 300 else value[:300] + "..."
+            unit_rows.append(row)
+        return {
+            "routine": summarize_row(result.get("routine") or {}),
+            "counts": {key: len(result.get(key) or []) for key in ("units", "xrefs", "fbd_nodes", "fbd_wires", "sfc_nodes", "sfc_links")},
+            "units": unit_rows,
+            "units_truncated": max(0, len(units) - unit_limit),
+            "detail": "summary",
+            "next_calls": [
+                "get_routine_slice(..., query=<tag>) for bounded logic",
+                "get_fbd_sheet(..., sheet=<n>) for FBD pseudo-equations",
+                "get_routine_context(..., detail='full') for raw rows",
+            ],
+        }
 
-    @mcp.tool()
-    def get_aoi(name: str) -> dict | None:
+    @_tool()
+    def list_aois(limit: int = 200, offset: int = 0) -> dict:
+        """List AOI definitions as summary rows; use get_aoi(name) for parameters."""
+
+        rows = query_symbols(workspace_path, kind="aoi", limit=1_000_000)
+        return envelope(rows, limit, offset)
+
+    @_tool()
+    def get_aoi(name: str, detail: str = "summary") -> dict:
+        """One AOI with projected parameters; detail='full' returns the raw row."""
+
         row = find_symbol(workspace_path, name)
-        return row if row and row.get("kind") == "aoi" else None
+        if not row or row.get("kind") != "aoi":
+            return not_found(workspace_path, "aoi", name)
+        if detail == "full":
+            return row
+        summary = summarize_row(row)
+        summary["parameters"] = [
+            {key: param.get(key) for key in ("name", "usage", "data_type", "required", "visible") if param.get(key) not in (None, "")}
+            for param in (row.get("parameters") or [])[:100]
+        ]
+        summary["routine_names"] = [str(item.get("name")) for item in (row.get("routines") or [])[:25]]
+        return summary
 
-    @mcp.tool()
+    @_tool()
     def get_aoi_context(name: str) -> dict | None:
         """Return an AOI definition, parameters, local tags, and routines."""
 
         return get_aoi_bundle(workspace_path, name)
 
-    @mcp.tool()
-    def list_modules(limit: int = 200) -> list[dict]:
-        return query_symbols(workspace_path, kind="module", limit=limit)
+    @_tool()
+    def list_modules(limit: int = 100, offset: int = 0) -> dict:
+        """List modules as summary rows; use get_module_context for ports/IO."""
 
-    @mcp.tool()
+        rows = query_symbols(workspace_path, kind="module", limit=1_000_000)
+        return envelope(rows, limit, offset)
+
+    @_tool()
     def get_module_context(module: str) -> dict | None:
         """Return a module with ports, connections, I/O tags, and point comments."""
 
         return get_module_bundle(workspace_path, module)
 
-    @mcp.tool()
-    def list_entities(kind: str | None = None, limit: int = 200) -> list[dict]:
-        return query_entities(workspace_path, kind=kind, limit=limit)
+    @_tool()
+    def list_entities(kind: str | None = None, limit: int = 100, offset: int = 0) -> dict:
+        rows = query_entities(workspace_path, kind=kind, limit=1_000_000)
+        return envelope(rows, limit, offset)
 
-    @mcp.tool()
-    def get_entity(entity_id: str) -> dict | None:
-        return workspace_get_entity(workspace_path, entity_id)
+    @_tool()
+    def get_entity(entity_id: str) -> dict:
+        row = workspace_get_entity(workspace_path, entity_id)
+        return row if row else not_found(workspace_path, "entity", entity_id)
 
-    @mcp.tool()
-    def search_entities(pattern: str, limit: int = 50) -> list[dict]:
-        return workspace_search_entities(workspace_path, pattern, limit)
+    @_tool()
+    def search_entities(pattern: str, limit: int = 50, offset: int = 0) -> dict:
+        rows = workspace_search_entities(workspace_path, pattern, offset + limit + 1)
+        return probe_envelope(rows, limit, offset)
 
-    @mcp.tool()
-    def search_logic(pattern: str, limit: int = 50) -> list[dict]:
-        return search_logic_rows(workspace_path, pattern, limit)
+    @_tool()
+    def search_logic(pattern: str, limit: int = 50, offset: int = 0) -> dict:
+        rows = search_logic_rows(workspace_path, pattern, offset + limit + 1)
+        return probe_envelope(rows, limit, offset)
 
-    @mcp.tool()
+    @_tool()
     def search_project(query: str, kinds: str | None = None, scope: str | None = None, limit: int = 20, offset: int = 0) -> dict:
         """Compact FTS-backed project search with bounded snippets."""
 
         return analysis_search_project(workspace_path, query, kinds=kinds, scope=scope, limit=limit, offset=offset)
 
-    @mcp.tool()
+    @_tool()
     def exists(query: str, kinds: str | None = None, scope: str | None = None) -> dict:
         """Cheap existence check over project search."""
 
         return analysis_exists(workspace_path, query, kinds=kinds, scope=scope)
 
-    @mcp.tool()
+    @_tool()
     def get_operand_context(operand: str, scope: str | None = None, detail: str = "summary") -> dict:
         """Compact context for a tag/member operand, references, comments, and data preview."""
 
         return analysis_get_operand_context(workspace_path, operand, scope=scope, detail=detail)
 
-    @mcp.tool()
+    @_tool()
     def get_routine_slice(
         program: str | None = None,
         routine: str | None = None,
@@ -206,7 +391,7 @@ def create_server(workspace: str | Path):
 
         return analysis_get_routine_slice(workspace_path, program, routine, routine_id, sheet, unit_id, query, before, after)
 
-    @mcp.tool()
+    @_tool()
     def get_fbd_sheet(
         program: str | None = None,
         routine: str | None = None,
@@ -219,7 +404,7 @@ def create_server(workspace: str | Path):
 
         return analysis_get_fbd_sheet(workspace_path, program=program, routine=routine, routine_id=routine_id, sheet=sheet, form=form, limit=limit)
 
-    @mcp.tool()
+    @_tool()
     def cross_reference(
         symbol: str,
         mode: str = "exact",
@@ -233,79 +418,82 @@ def create_server(workspace: str | Path):
 
         return analysis_cross_reference(workspace_path, symbol, mode=mode, access=access, destructive=destructive, scope=scope, limit=limit, offset=offset)
 
-    @mcp.tool()
-    def find_references(symbol: str, limit: int = 200) -> list[dict]:
-        return workspace_find_references(workspace_path, symbol, limit)
+    @_tool()
+    def find_references(symbol: str, limit: int = 200, offset: int = 0) -> dict:
+        rows = workspace_find_references(workspace_path, symbol, offset + limit + 1)
+        return probe_envelope(rows, limit, offset, detail="full")
 
-    @mcp.tool()
+    @_tool()
     def trace_signal(symbol: str, direction: str = "upstream", max_depth: int = 4, limit: int = 100) -> dict:
         """Trace a signal through compact writers/readers and first-pass FBD flow."""
 
         return analysis_trace_signal(workspace_path, symbol, direction=direction, max_depth=max_depth, limit=limit)
 
-    @mcp.tool()
+    @_tool()
     def triage_issue(issue_text: str, limit: int = 5) -> dict:
         """PLC-first evidence bundle for a field issue description."""
 
         return analysis_triage_issue(workspace_path, issue_text, limit=limit)
 
-    @mcp.tool()
+    @_tool()
     def scope_metadata(issue_text: str | None = None) -> dict:
         """Describe in-scope offline PLC evidence and out-of-scope HMI/runtime limits."""
 
         return analysis_scope_metadata(workspace_path, issue_text)
 
-    @mcp.tool()
+    @_tool()
     def resolve_alarm(name_or_class: str, limit: int = 10) -> dict:
         """Resolve alarm records to source tags, messages, and PLC evidence."""
 
         return analysis_resolve_alarm(workspace_path, name_or_class, limit=limit)
 
-    @mcp.tool()
+    @_tool()
     def decode_summary(tag: str, limit: int = 50) -> dict:
         """Expand a summary coil/tag into candidate member bits and alarms."""
 
         return analysis_decode_summary(workspace_path, tag, limit=limit)
 
-    @mcp.tool()
+    @_tool()
     def aoi_instance_bindings(instance: str, limit: int = 10) -> dict:
         """Return FBD AOI instance pin bindings, including unwired parameters."""
 
         return analysis_aoi_instance_bindings(workspace_path, instance, limit=limit)
 
-    @mcp.tool()
+    @_tool()
     def tag_producers_consumers(name: str) -> dict:
         """List routines that write a tag (producers) vs read it (consumers)."""
 
         return graph_tag_producers_consumers(workspace_path, name)
 
-    @mcp.tool()
+    @_tool()
     def impact_of(name: str, max_depth: int = 3, limit: int = 300) -> dict:
         """Transitive change-propagation analysis from a tag through the logic."""
 
         return graph_impact_of(workspace_path, name, max_depth=max_depth, limit=limit)
 
-    @mcp.tool()
+    @_tool()
     def io_trace(name: str) -> dict:
         """Resolve a tag's alias chain to physical I/O points, logic, and alarms."""
 
         return graph_io_trace(workspace_path, name)
 
-    @mcp.tool()
+    @_tool()
     def call_graph(routine: str | None = None, program: str | None = None) -> dict:
         """Callers/callees of a routine, or the task/program scheduling tree."""
 
         return graph_call_graph(workspace_path, routine, program)
 
-    @mcp.tool()
-    def run_diagnostics() -> dict:
+    @_tool()
+    def run_diagnostics(rules: str | None = None, severity: str | None = None, limit: int = 50) -> dict:
         """Run static-analysis rules and return prioritized findings.
 
         Covers multiple-output writers, dead/uninitialized tags, broken aliases,
         unscheduled programs, inhibited/faulted modules, and unused AOIs/UDTs.
+        Filter with rules (comma-separated rule names) and severity; limit caps
+        the returned findings while summary keeps the uncapped totals.
         """
 
-        return run_diagnostics_impl(workspace_path)
+        return run_diagnostics_impl(workspace_path, rules=rules, severity=severity, limit=limit)
 
     return mcp
 

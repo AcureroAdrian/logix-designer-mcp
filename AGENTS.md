@@ -100,7 +100,8 @@ estructurada.
 - `ir/modules.jsonl`, `ir/module_ports.jsonl`,
   `ir/module_io_tags.jsonl`, `ir/module_io_points.jsonl`: hardware y E/S.
 - `ir/comments.jsonl`, `ir/tag_comments.jsonl`: comentarios/descripciones.
-- `ir/tag_data.jsonl`, `ir/data_values.jsonl`: `Data`/`DefaultData`.
+- `ir/tag_data.jsonl`: `Data`/`DefaultData` (en SQLite la tabla se llama
+  `data_values`; el JSONL duplicado `data_values.jsonl` fue eliminado).
 - `ir/alarms.jsonl`, `ir/messages.jsonl`: alarmas y mensajes.
 - `ir/xrefs.jsonl`: referencias read/write/read_write/unknown.
 - `ir/edges.jsonl`: relaciones para analisis de grafo.
@@ -113,7 +114,20 @@ probar un bug de extraccion, confirmar ausencia de evidencia o revisar codigo
 fuente del repo.
 
 - `project_summary()` para orientarte.
-- `coverage_report()` para comprobar si la ingestion es confiable.
+- `coverage_report()` para comprobar si la ingestion es confiable. Incluye dos
+  superficies de honestidad: `unknown_elements` (P0: elementos XML que el
+  pipeline no conoce; si trae filas, la extraccion esta perdiendo datos
+  nuevos) y `unextracted_elements` (P1: elementos conocidos pero todavia no
+  modelados, cada uno con su nota).
+- Los `list_*` devuelven un envelope `{items, total, offset, limit, has_more,
+  truncated}` con filas resumen (sin `body`/members/nodos crudos). Para el
+  detalle usar los `get_*` puntuales; `get_udt`/`get_aoi`/`get_routine_context`
+  aceptan `detail="full"` de forma explicita.
+- Los lookups fallidos devuelven `{found: false, did_you_mean: [...]}` en vez
+  de `null`.
+- El indice SQLite tiene `PRAGMA user_version`; si el workspace fue generado
+  por una version anterior del esquema, las consultas fallan con
+  `WorkspaceSchemaError` pidiendo re-ingerir.
 - `search_project(query, kinds=None, scope=None, limit=20, offset=0)` para buscar
   en el indice FTS con snippets acotados.
 - `exists(query, kinds=None, scope=None)` para negativos baratos y confiables.
@@ -156,7 +170,9 @@ fuente del repo.
 - `get_module_context(module)` para puertos, conexiones, I/O tags y comentarios
   de puntos.
 - `call_graph(routine=None, program=None)` para llamadas o arbol task/program.
-- `run_diagnostics()` para hallazgos priorizados.
+  Incluye llamadas JSR hechas desde rutinas FBD.
+- `run_diagnostics(rules=None, severity=None, limit=50)` para hallazgos
+  priorizados, filtrables por regla y severidad.
 
 ## Recetas de analisis
 
@@ -229,7 +245,9 @@ Antes de declarar una mejora terminada:
 - Confirmar que no se agregaron `.L5X`, `.logix/`, caches o datos sensibles a
   git.
 
-Para el fixture Arnold actual, la suite completa esperada es `57 passed`.
+Para el fixture Arnold actual, la suite completa esperada es `74 passed`
+(incluye tests de presupuesto de contexto que requieren el workspace Arnold
+re-ingerido con el esquema actual).
 
 ## Arquitectura de codigo
 
@@ -256,7 +274,15 @@ Para el fixture Arnold actual, la suite completa esperada es `57 passed`.
 - Solo `.L5X` esta soportado como fuente. `.ACD`, `.L5K`, `.AML` y `.RDF` no se
   parsean todavia.
 - El extractor es read-only y no escribe logica de vuelta a Logix Designer.
+  El MCP tampoco expone ingestion: `ingest` es solo CLI y todas las
+  herramientas declaran `readOnlyHint`.
 - Algunas xrefs siguen siendo heuristicas; cada fila indica `confidence`.
+  ALMD/ALMA/SIZE/SFR ya tienen firma typed (el tag de alarma genera ademas un
+  write derivado `<tag>.InAlarm`); JMP/LBL no generan xrefs porque sus
+  operandos son labels.
+- Los elementos listados por `coverage_report().surfaces.unextracted_elements`
+  (MessageParameters, RedundancyInfo, EngineeringUnit, DataTypeFormat, etc.)
+  existen en el L5X pero aun no se modelan en IR.
 - ST/SFC pueden detectar simbolos y asignaciones, pero el tipado profundo de
   llamadas AOI en ST/SFC todavia no es completo.
 - Los diagnostics pueden truncar hallazgos por regla; revisar `total_uncapped`,

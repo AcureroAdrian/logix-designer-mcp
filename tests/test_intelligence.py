@@ -94,6 +94,18 @@ INTELLIGENCE_L5X = """<?xml version="1.0" encoding="UTF-8"?>
               </Sheet>
             </FBDContent>
           </Routine>
+          <Routine Name="Dispatch" Type="FBD">
+            <FBDContent>
+              <Sheet Number="1">
+                <JSR ID="0" X="660" Y="100" Routine="Cooling_PID"/>
+              </Sheet>
+            </FBDContent>
+          </Routine>
+          <Routine Name="EmptyFbd" Type="FBD">
+            <FBDContent>
+              <Sheet Number="1"/>
+            </FBDContent>
+          </Routine>
         </Routines>
       </Program>
     </Programs>
@@ -188,6 +200,25 @@ def test_get_fbd_sheet_returns_pseudo_equations_and_aoi_unwired(tmp_path: Path):
     assert any("Motor_AOI_Out := Motor_AOI_01.Out" in eq for eq in result["equations"])
     assert result["aoi_instances"][0]["summary"]["required_unwired"] == ["Feedback"]
     assert any(row["param"] == "Feedback" for row in result["unwired_pins"])
+
+
+def test_get_fbd_sheet_renders_jsr_dispatch_as_call(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+
+    result = get_fbd_sheet(workspace, program="Main", routine="Dispatch", sheet=1)
+
+    assert result["status"] == "ok"
+    assert result["summary"]["jsr_calls"] == 1
+    assert "CALL Cooling_PID" in result["equations"]
+
+
+def test_get_fbd_sheet_warns_instead_of_ok_on_empty_sheet(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+
+    result = get_fbd_sheet(workspace, program="Main", routine="EmptyFbd", sheet=1)
+
+    assert result["status"] == "empty_sheet"
+    assert any("No FBD nodes were extracted" in str(limit) for limit in result["limits"])
 
 
 def test_triage_issue_returns_plc_first_bundle(tmp_path: Path):

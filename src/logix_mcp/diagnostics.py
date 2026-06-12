@@ -318,14 +318,33 @@ RULES = [
 ]
 
 
-def run_diagnostics(workspace: str | Path) -> dict:
-    """Run every diagnostic rule and return prioritized findings."""
+def run_diagnostics(
+    workspace: str | Path,
+    rules: str | list[str] | None = None,
+    severity: str | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Run static-analysis rules and return prioritized findings.
+
+    ``rules`` (name or comma-separated names) and ``severity`` filter findings;
+    ``limit`` caps the rows returned. The summary always reflects the filtered
+    but uncapped totals so truncation stays visible.
+    """
+
+    rule_filter: set[str] | None = None
+    if rules:
+        names = rules if isinstance(rules, list) else [part.strip() for part in str(rules).split(",")]
+        rule_filter = {name for name in names if name}
 
     ctx = _Context(workspace)
     findings: list[dict] = []
     true_counts: dict[str, int] = {}
     for rule in RULES:
         produced = rule(ctx)
+        if rule_filter is not None:
+            produced = [finding for finding in produced if finding["rule"] in rule_filter]
+        if severity:
+            produced = [finding for finding in produced if finding["severity"] == severity]
         if produced:
             rule_name = produced[0]["rule"]
             true_counts[rule_name] = true_counts.get(rule_name, 0) + len(produced)
@@ -344,6 +363,9 @@ def run_diagnostics(workspace: str | Path) -> dict:
 
     truncated = {rule: total for rule, total in true_counts.items() if total > by_rule.get(rule, 0)}
 
+    if limit is not None and limit >= 0:
+        findings = findings[:limit]
+
     return {
         "summary": {
             "total": len(findings),
@@ -352,9 +374,21 @@ def run_diagnostics(workspace: str | Path) -> dict:
             "by_rule": by_rule,
             "truncated": truncated,
             "per_rule_limit": PER_RULE_LIMIT,
+            "filters": _compact_filters(rule_filter, severity, limit),
         },
         "findings": findings,
     }
+
+
+def _compact_filters(rule_filter: set[str] | None, severity: str | None, limit: int | None) -> dict:
+    filters: dict = {}
+    if rule_filter:
+        filters["rules"] = sorted(rule_filter)
+    if severity:
+        filters["severity"] = severity
+    if limit is not None:
+        filters["limit"] = limit
+    return filters
 
 
 def diagnostics_markdown(result: dict) -> str:

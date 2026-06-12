@@ -16,7 +16,7 @@ from .xrefs import (
 
 JsonDict = dict[str, Any]
 
-FBD_NODE_ELEMENTS = {"IRef", "ORef", "ICon", "OCon", "Block", "AddOnInstruction", "TextBox"}
+FBD_NODE_ELEMENTS = {"IRef", "ORef", "ICon", "OCon", "Block", "AddOnInstruction", "TextBox", "JSR"}
 SFC_NODE_ELEMENTS = {"Step", "Transition", "Action", "Branch"}
 
 
@@ -438,7 +438,8 @@ def _fbd_node(
             "node_type": node_type,
             "node_id": node_id,
             "id_on_sheet": node_id,
-            "instruction": elem.attrib.get("Type") or elem.attrib.get("Name") or node_type,
+            "instruction": "JSR" if node_type == "JSR" else (elem.attrib.get("Type") or elem.attrib.get("Name") or node_type),
+            "callee": elem.attrib.get("Routine") if node_type == "JSR" else None,
             "operand": elem.attrib.get("Operand"),
             "connector_name": elem.attrib.get("Name") if node_type in {"ICon", "OCon"} else None,
             "visible_pins": elem.attrib.get("VisiblePins"),
@@ -489,6 +490,9 @@ def _fbd_xrefs(node: JsonDict, routine_id: str) -> list[JsonDict]:
         access = "write"
     else:
         access = "read_write"
+
+    if node_type == "JSR" and node.get("callee"):
+        refs.append(_ref(str(node["callee"]), routine_id, "call", "FBD_JSR", str(node.get("id"))))
 
     for operand in [node.get("operand")]:
         for symbol in extract_tag_references(str(operand or ""), include_calls=False):
@@ -600,6 +604,8 @@ def _fbd_node_text(node: JsonDict) -> str:
     parts = [node_type, str(node.get("node_id") or "")]
     if node.get("instruction"):
         parts.append(f"instruction={node['instruction']}")
+    if node.get("callee"):
+        parts.append(f"callee={node['callee']}")
     if node.get("operand"):
         parts.append(f"operand={node['operand']}")
     if node.get("connector_name"):
@@ -703,6 +709,8 @@ def _calls_from_fbd_nodes(nodes: list[JsonDict]) -> list[JsonDict]:
             calls.append({"call_type": "aoi", "callee": node.get("instruction"), "operand": node.get("operand")})
         elif node_type == "Block":
             calls.append({"call_type": "block", "callee": node.get("instruction"), "operand": node.get("operand")})
+        elif node_type == "JSR":
+            calls.append({"call_type": "routine", "callee": node.get("callee"), "instruction": "JSR"})
     return _dedupe_call_rows(calls)
 
 

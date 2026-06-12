@@ -101,8 +101,8 @@ def cross_reference(
     elif destructive is False:
         where.append("access NOT IN ('write', 'read_write')")
     if scope:
-        where.append("json LIKE ?")
-        params.append(f'%"program": "{scope}"%')
+        where.append("program = ?")
+        params.append(_normalize_scope(scope))
 
     clause = " AND ".join(where)
     with db.connect(workspace) as conn:
@@ -114,6 +114,14 @@ def cross_reference(
         rows = [_enrich_xref(conn, json.loads(row["json"])) for row in cursor]
         summary = _xref_summary(conn, clause, params)
     return _xref_result(symbol, mode, access, destructive, scope, rows, total, limit, offset, summary)
+
+
+def _normalize_scope(scope: str) -> str:
+    """Accept both ``UWP`` and ``Program:UWP`` scope spellings."""
+
+    if scope.startswith("Program:"):
+        return scope.split(":", 1)[1]
+    return scope
 
 
 def get_operand_context(
@@ -300,7 +308,13 @@ def trace_signal(
         else:
             unit = _source_unit(context, ref.get("source"))
             if unit:
-                paths.append({"type": language.lower() or "logic", "reference": ref, "unit": _compact_unit(unit, {})})
+                # The unit text already carries the rung; drop the reference
+                # snippet and the parsed instruction list so the same rung is
+                # not serialized three times per path.
+                unit_row = _compact_unit(unit, {})
+                unit_row.pop("instructions", None)
+                ref_row = {key: value for key, value in ref.items() if key != "snippet"}
+                paths.append({"type": language.lower() or "logic", "reference": ref_row, "unit": unit_row})
             else:
                 unresolved.append({"source": ref.get("source"), "reason": "source_unit_not_found"})
 
@@ -1163,6 +1177,8 @@ def _build_fbd_sheet_pseudo(workspace: str | Path, context: JsonDict, unit: Json
         text = f"{row.get('target')} := {row.get('expr')}"
         if row.get("kind") == "aoi_output_unwired":
             text = f"{row.get('target')} -> UNWIRED"
+        elif row.get("kind") == "jsr_call":
+            text = f"CALL {row.get('expr')}"
         row["text"] = text
         equations.append(row)
 
@@ -1182,6 +1198,19 @@ def _build_fbd_sheet_pseudo(workspace: str | Path, context: JsonDict, unit: Json
 
     for node in nodes:
         node_type = node.get("node_type")
+        if node_type == "JSR":
+            add_equation(
+                {
+                    "kind": "jsr_call",
+                    "target": f"JSR:{node.get('node_id')}",
+                    "expr": node.get("callee") or "UNKNOWN_ROUTINE",
+                    "node_id": node.get("node_id"),
+                    "sheet": node.get("sheet_number"),
+                    "evidence_ref": node.get("id"),
+                    "unresolved": [],
+                }
+            )
+            continue
         if node_type == "IRef":
             _append_symbol(source_tags, node.get("operand"))
             continue
@@ -1242,6 +1271,7 @@ def _build_fbd_sheet_pseudo(workspace: str | Path, context: JsonDict, unit: Json
             "input_refs": sum(1 for node in nodes if node.get("node_type") == "IRef"),
             "output_refs": sum(1 for node in nodes if node.get("node_type") == "ORef"),
             "blocks": sum(1 for node in nodes if node.get("node_type") == "Block"),
+            "jsr_calls": sum(1 for node in nodes if node.get("node_type") == "JSR"),
             "aois": len(aoi_instances),
             "connectors": len(connectors),
             "unresolved_edges": len(_dedupe_dicts(unresolved)),
@@ -1254,7 +1284,9 @@ def _build_fbd_sheet_pseudo(workspace: str | Path, context: JsonDict, unit: Json
         "aoi_instances": aoi_instances[:20],
         "unwired_pins": unwired_pins[:100],
         "unresolved_edges": _dedupe_dicts(unresolved)[:100],
-        "pseudo_equations": equations[:limit],
+        # Structured rows (without text) plus a parallel text list; the text
+        # used to be duplicated inside every row.
+        "pseudo_equations": [{key: value for key, value in row.items() if key != "text"} for row in equations[:limit]],
         "equations": [row["text"] for row in equations[:limit]],
         "truncated_equations": max(0, len(equations) - limit),
         "limits": _fbd_sheet_limits(equations, limit, unresolved),
@@ -1264,6 +1296,16 @@ def _build_fbd_sheet_pseudo(workspace: str | Path, context: JsonDict, unit: Json
             "get_routine_slice(..., sheet=<sheet>)",
         ],
     }
+    if not nodes:
+        # Never report an empty sheet as a plain "ok": either the routine truly
+        # has no logic or the extractor failed to model its node types.
+        output["status"] = "empty_sheet"
+        output["limits"] = [
+            "No FBD nodes were extracted for this sheet. The routine may be empty, "
+            "or it uses node types the extractor does not model; verify against the "
+            "source L5X before concluding the routine does nothing.",
+            *output["limits"],
+        ]
     return output
 
 

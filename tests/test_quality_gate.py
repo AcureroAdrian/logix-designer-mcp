@@ -11,12 +11,12 @@ from logix_mcp.workspace import ingest_l5x, read_jsonl
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REAL_L5X = PROJECT_ROOT / "Arnold_0057_022_052226.L5X"
-GENERATED_WORKSPACE = PROJECT_ROOT / "Arnold_0057_022_052226.logix"
+REAL_L5X = PROJECT_ROOT / "Arnold_0058_020_060926.L5X"
+GENERATED_WORKSPACE = PROJECT_ROOT / "Arnold_0058_020_060926.logix"
 
 EXPECTED_XML_COUNTS = {
-    "comments": 9590,
-    "data_blocks": 13966,
+    "comments": 9649,
+    "data_blocks": 13983,
     "default_data_blocks": 6484,
     "fbd_routines": 37,
     "fbd_sheets": 142,
@@ -55,7 +55,7 @@ def arnold_workspace(tmp_path_factory: pytest.TempPathFactory, arnold_l5x: Path)
     if (GENERATED_WORKSPACE / "ir" / "project.json").exists():
         return GENERATED_WORKSPACE
 
-    workspace = tmp_path_factory.mktemp("arnold_quality_gate") / "Arnold_0057_022_052226.logix"
+    workspace = tmp_path_factory.mktemp("arnold_quality_gate") / "Arnold_0058_020_060926.logix"
     ingest_l5x(arnold_l5x, workspace)
     return workspace
 

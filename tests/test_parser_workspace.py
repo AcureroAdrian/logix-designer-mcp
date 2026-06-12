@@ -97,3 +97,35 @@ def test_ingest_l5x_materializes_workspace(tmp_path: Path):
     assert (out / "index" / "logix.sqlite").exists()
     symbols = read_jsonl(out, "symbols.jsonl")
     assert any(row["name"] == "StartPB" for row in symbols)
+
+
+def test_coverage_gate_passes_for_fully_handled_l5x(tmp_path: Path):
+    source = tmp_path / "demo.L5X"
+    source.write_text(SIMPLE_L5X, encoding="utf-8")
+
+    coverage = parse_l5x(source)["coverage"]
+
+    assert coverage["surfaces"]["unknown_elements"]["missing_count"] == 0
+    assert coverage["surfaces"]["unextracted_elements"]["missing_count"] == 0
+    assert coverage["missing"]["P0"] == []
+
+
+def test_coverage_gate_flags_unknown_and_unextracted_elements(tmp_path: Path):
+    # An element the pipeline has never heard of must turn the P0 semaphore
+    # red; a known-but-unextracted element must show up as a documented P1 gap.
+    fixture = SIMPLE_L5X.replace(
+        "<Tags>\n      <Tag Name=\"StartPB\"",
+        "<RedundancyInfo Enabled=\"true\"/>\n    <FutureWidget Mode=\"x\"/>\n    <Tags>\n      <Tag Name=\"StartPB\"",
+        1,
+    )
+    source = tmp_path / "demo.L5X"
+    source.write_text(fixture, encoding="utf-8")
+
+    coverage = parse_l5x(source)["coverage"]
+    unknown = coverage["surfaces"]["unknown_elements"]
+    unextracted = coverage["surfaces"]["unextracted_elements"]
+
+    assert unknown["missing"] == [{"element": "FutureWidget", "count": 1}]
+    assert "unknown_elements" in coverage["missing"]["P0"]
+    assert any(entry["element"] == "RedundancyInfo" and entry["note"] for entry in unextracted["missing"])
+    assert "unextracted_elements" in coverage["missing"]["P1"]

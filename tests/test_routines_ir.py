@@ -99,6 +99,34 @@ def test_extract_fbd_units_include_sheets_nodes_wires_textboxes_aoi_calls_and_xr
     json.dumps(routine_ir_from_element(routine, routine_id="Program:Main.Routine:FbdLogic"))
 
 
+def test_extract_fbd_units_model_jsr_as_first_class_node():
+    # Golden case from Arnold Drv_Cooling/main: a dispatch-only FBD sheet whose
+    # entire body is JSR nodes used to look empty with no warning.
+    routine = _xml(
+        """
+        <Routine Name="main" Type="FBD">
+          <FBDContent>
+            <Sheet Number="1">
+              <JSR ID="0" X="660" Y="100" Routine="PID"/>
+              <JSR ID="1" X="660" Y="200" Routine="Scale_Valve"/>
+            </Sheet>
+          </FBDContent>
+        </Routine>
+        """
+    )
+
+    units = extract_fbd_units(routine, routine_id="Program:Drv_Cooling.Routine:main")
+    sheet = units[0]
+    jsr_nodes = [node for node in sheet["nodes"] if node["node_type"] == "JSR"]
+
+    assert [node["callee"] for node in jsr_nodes] == ["PID", "Scale_Valve"]
+    assert all(node["instruction"] == "JSR" for node in jsr_nodes)
+    assert ("PID", "routine") in {(call["callee"], call["call_type"]) for call in sheet["calls"]}
+    assert ("Scale_Valve", "routine") in {(call["callee"], call["call_type"]) for call in sheet["calls"]}
+    assert ("PID", "call", "FBD_JSR") in {(ref["symbol"], ref["access"], ref["instruction"]) for ref in sheet["xrefs"]}
+    json.dumps(units)
+
+
 def test_extract_fbd_units_include_named_connectors():
     routine = _xml(
         """

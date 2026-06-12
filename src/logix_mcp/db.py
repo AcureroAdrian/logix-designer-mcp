@@ -23,6 +23,16 @@ import json
 import sqlite3
 
 
+# Bump whenever the SQLite schema changes in a way that requires re-ingesting.
+# The ingest step stamps this into ``PRAGMA user_version``; ``connect`` rejects
+# workspaces built with a different version instead of returning wrong results.
+SCHEMA_VERSION = 1
+
+
+class WorkspaceSchemaError(RuntimeError):
+    """The workspace index was built by an incompatible ingest version."""
+
+
 def index_path(workspace: str | Path) -> Path:
     return Path(workspace) / "index" / "logix.sqlite"
 
@@ -40,6 +50,12 @@ def connect(workspace: str | Path) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version != SCHEMA_VERSION:
+            raise WorkspaceSchemaError(
+                f"Workspace index {path} has schema version {version}, expected {SCHEMA_VERSION}. "
+                f"Re-ingest the project: python -m logix_mcp ingest <project.L5X> --out {Path(workspace)}"
+            )
         yield conn
     finally:
         conn.close()

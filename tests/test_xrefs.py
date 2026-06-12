@@ -132,6 +132,48 @@ def test_typed_instructions_report_confidence():
     assert unknown[0]["confidence"] == "heuristic"
 
 
+def test_almd_classifies_alarm_tag_and_derives_inalarm_write():
+    # Golden case from Arnold AUX_EQUIP/R06_ALARM Rung 0 (1756-RM003 semantics).
+    text = "XIO(SWGR480.Power)ALMD(SWGR480_ALM_PowerFail,ALARMS_ACK_ALL_PB,0,0,0);"
+    refs = extract_references(text, "RLL", "Program:AUX_EQUIP.Routine:R06_ALARM")
+    by_symbol = {(ref["symbol"], ref["access"], ref["instruction"]) for ref in refs}
+
+    assert ("SWGR480.Power", "read", "XIO") in by_symbol
+    assert ("SWGR480_ALM_PowerFail", "read_write", "ALMD") in by_symbol
+    assert ("ALARMS_ACK_ALL_PB", "read", "ALMD") in by_symbol
+    # Derived member write so traces find a producer for the alarm status.
+    assert ("SWGR480_ALM_PowerFail.InAlarm", "write", "ALMD") in by_symbol
+    assert all(ref["access"] != "unknown" for ref in refs)
+
+
+def test_alma_classifies_analog_input_as_read():
+    # Golden case from Arnold AUX_EQUIP/R06_ALARM Rung 134.
+    text = "CPT(G1_WINDING_TEMP_COMPT,G1_WINDING_TEMP_RAW*0.1)ALMA(G1_WINDING_TEMP,G1_WINDING_TEMP_COMPT,ALARMS_ACK_ALL_PB,0,0);"
+    refs = extract_references(text, "RLL", "Program:AUX_EQUIP.Routine:R06_ALARM")
+    by_symbol = {(ref["symbol"], ref["access"], ref["instruction"]) for ref in refs}
+
+    assert ("G1_WINDING_TEMP", "read_write", "ALMA") in by_symbol
+    # The analog In operand is the causal read that links CPT -> ALMA -> alarm.
+    assert ("G1_WINDING_TEMP_COMPT", "read", "ALMA") in by_symbol
+    assert ("G1_WINDING_TEMP_COMPT", "write", "CPT") in by_symbol
+    assert ("G1_WINDING_TEMP.InAlarm", "write", "ALMA") in by_symbol
+    assert all(ref["access"] != "unknown" for ref in refs)
+
+
+def test_jmp_lbl_labels_produce_no_xrefs_and_size_sfr_are_typed():
+    text = "JMP(END_LBL)LBL(END_LBL)SIZE(DataArray,0,ArrayLen)SFR(SFC_Main,Step_010);"
+    refs = extract_references(text, "RLL", "Program:Main.Routine:Run")
+    by_symbol = {(ref["symbol"], ref["access"], ref["instruction"]) for ref in refs}
+
+    # Rung labels are jump targets, not tags.
+    assert not any(ref["symbol"] == "END_LBL" for ref in refs)
+    assert ("DataArray", "read", "SIZE") in by_symbol
+    assert ("ArrayLen", "write", "SIZE") in by_symbol
+    assert ("SFC_Main", "call", "SFR") in by_symbol
+    assert ("Step_010", "read", "SFR") in by_symbol
+    assert all(ref["access"] != "unknown" for ref in refs)
+
+
 def test_aoi_signature_from_parameters_skips_enable_bits_and_maps_usage():
     params = [
         {"name": "EnableIn", "usage": "Input"},

@@ -30,7 +30,7 @@ Generated workspace shape:
 │  ├─ diagnostics.json
 │  ├─ symbols.jsonl
 │  ├─ tags.jsonl
-│  ├─ data_values.jsonl
+│  ├─ tag_data.jsonl
 │  ├─ comments.jsonl
 │  ├─ routines.jsonl
 │  ├─ routine_units.jsonl
@@ -66,6 +66,9 @@ comments, alarms, and data/default data references.
 compares them against extracted surfaces. For the Arnold fixture, P0 coverage is
 expected to be complete for comments, data/default data blocks, FBD nodes, SFC
 nodes, module I/O tag surfaces, routine Markdown comments, and AOI routine pages.
+Two honesty surfaces guard the gate: `unknown_elements` (P0: XML elements the
+pipeline does not recognize at all) and `unextracted_elements` (P1: known
+elements not modeled yet, each with a documented reason).
 
 `ir/diagnostics.json` (and the matching `ai/diagnostics.md`) hold static-analysis
 findings: multiple-output writers, dead/uninitialized tags, broken aliases,
@@ -102,35 +105,39 @@ do not use it as the first pass over generated industrial artifacts.
 
 ## MCP Tools
 
+All tools are read-only (`readOnlyHint`); ingestion is CLI-only
+(`python -m logix_mcp ingest`). `list_*` tools return a uniform envelope
+`{items, total, offset, limit, has_more, truncated}` with summary rows (never
+raw bodies/members/nodes); failed lookups return `{found: false, did_you_mean}`.
+
 - `project_summary()`
 - `coverage_report()`
-- `load_project(path, out=None)`
-- `list_tags(scope=None, data_type=None, limit=200)`
+- `list_tags(scope=None, data_type=None, limit=100, offset=0)`
 - `get_tag(name, scope=None)`
 - `get_tag_context(name, scope=None)`
-- `list_udts(limit=200)`
-- `get_udt(name)`
-- `list_programs()`
+- `list_udts(limit=200, offset=0)`
+- `get_udt(name, detail="summary")`
+- `list_programs(limit=200, offset=0)`
 - `get_program(name)`
-- `list_routines(program=None, limit=200)`
+- `list_routines(program=None, limit=100, offset=0)`
 - `get_routine(program, routine)`
-- `get_routine_context(program=None, routine=None, routine_id=None)`
-- `list_aois(limit=200)`
-- `get_aoi(name)`
+- `get_routine_context(program=None, routine=None, routine_id=None, detail="summary", unit_limit=100)`
+- `list_aois(limit=200, offset=0)`
+- `get_aoi(name, detail="summary")`
 - `get_aoi_context(name)`
-- `list_modules(limit=200)`
+- `list_modules(limit=100, offset=0)`
 - `get_module_context(module)`
-- `list_entities(kind=None, limit=200)`
+- `list_entities(kind=None, limit=100, offset=0)`
 - `get_entity(entity_id)`
-- `search_entities(pattern, limit=50)`
-- `search_logic(pattern, limit=50)`
+- `search_entities(pattern, limit=50, offset=0)`
+- `search_logic(pattern, limit=50, offset=0)`
 - `search_project(query, kinds=None, scope=None, limit=20, offset=0)`
 - `exists(query, kinds=None, scope=None)`
 - `get_operand_context(operand, scope=None, detail="summary")`
 - `get_routine_slice(program=None, routine=None, routine_id=None, sheet=None, unit_id=None, query=None, before=1, after=1)`
 - `get_fbd_sheet(program=None, routine=None, routine_id=None, sheet=None, form="pseudo", limit=100)`
 - `cross_reference(symbol, mode="exact", access=None, destructive=None, scope=None, limit=50, offset=0)`
-- `find_references(symbol, limit=200)`
+- `find_references(symbol, limit=200, offset=0)`
 - `trace_signal(symbol, direction="upstream", max_depth=4, limit=100)`
 - `triage_issue(issue_text, limit=5)`
 - `scope_metadata(issue_text=None)`
@@ -146,15 +153,17 @@ do not use it as the first pass over generated industrial artifacts.
 - `io_trace(name)` - resolve a tag's alias chain to physical I/O, logic, alarms.
 - `call_graph(routine=None, program=None)` - callers/callees of a routine, or
   the task/program scheduling tree (including unscheduled programs).
-- `run_diagnostics()` - prioritized static-analysis findings.
+- `run_diagnostics(rules=None, severity=None, limit=50)` - prioritized
+  static-analysis findings, filterable by rule and severity.
 
 ## Notes
 
 - `.L5X` is the only supported source format in v1.
 - `.ACD`, `.L5K`, `.AML`, and `.RDF` are intentionally not parsed yet.
 - The extractor never modifies the input `.L5X`.
-- Cross-references are classified from a per-instruction signature table and from
-  AOI parameter usage, and each row carries a `confidence` (`typed` vs
+- Cross-references are classified from a per-instruction signature table
+  (including ALMD/ALMA, which also emit a derived `<tag>.InAlarm` write) and
+  from AOI parameter usage, and each row carries a `confidence` (`typed` vs
   `heuristic`). Operands of instructions outside the table remain `heuristic`
   with access `unknown`; ST/SFC AOI-call argument directions are not yet typed.
   The raw routine units and source comments/data are preserved in IR for

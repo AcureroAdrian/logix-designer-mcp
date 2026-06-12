@@ -15,10 +15,29 @@ build/
 *.AML
 *.RDF
 
-# Generated analysis workspaces.
+# Generated analysis workspaces and future runtime snapshots.
 *.logix/
 logix-workspace/
 workspaces/
+runtime/
+snapshots/
+
+# SQLite side files (may hold workspace data outside the ignored dirs).
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Local agent/MCP configuration and secrets.
+.claude/settings.local.json
+.env
+.env.*
+.mcp.local.json
+
+# Network captures can embed plant addresses and payloads.
+*.pcap
+*.pcapng
+*.har
 
 # Local scratch outputs.
 $out
+.tmp/

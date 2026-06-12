@@ -27,6 +27,70 @@ from .xrefs import aoi_signature_from_parameters
 JsonDict = dict[str, Any]
 
 
+# XML elements the pipeline extracts into IR datasets or fields. The coverage
+# gate compares every element found in the source against these sets, so an
+# element missing from all three lists turns the P0 semaphore red instead of
+# passing silently.
+HANDLED_ELEMENTS = {
+    # Root / controller / tags
+    "RSLogix5000Content", "Controller", "Tags", "Tag", "Description",
+    "Comments", "Comment",
+    # Tag data trees
+    "Data", "DefaultData", "DataValue", "DataValueMember", "Structure",
+    "StructureMember", "Array", "ArrayMember", "Element",
+    # Data types
+    "DataTypes", "DataType", "Members", "Member",
+    # AOI definitions
+    "AddOnInstructionDefinitions", "AddOnInstructionDefinition",
+    "Parameters", "Parameter", "LocalTags", "LocalTag", "EKey",
+    # Programs / tasks
+    "Programs", "Program", "Routines", "Routine", "Body",
+    "Tasks", "Task", "ScheduledPrograms", "ScheduledProgram",
+    # Routine content
+    "RLLContent", "Rung", "Text", "STContent", "Line",
+    "FBDContent", "Sheet", "IRef", "ORef", "ICon", "OCon", "Block",
+    "AddOnInstruction", "InputParameter", "OutputParameter", "InOutParameter",
+    "TextBox", "Wire", "JSR",
+    "SFCContent", "Step", "Transition", "Action", "Branch", "Leg",
+    "DirectedLink", "Condition",
+    # Alarms / messages / produce-consume
+    "AlarmConfig", "AlarmDigitalParameters", "AlarmAnalogParameters",
+    "AlarmClass", "Messages", "Message", "ProduceInfo", "ConsumeInfo",
+    # Hardware
+    "Modules", "Module", "Ports", "Port", "Bus", "Communications",
+    "Connections", "Connection", "RackConnection",
+    "ConfigTag", "InputTag", "OutputTag", "InAliasTag", "OutAliasTag",
+    # ExtendedProperties text payloads preserved by _extended_properties
+    "ExtendedProperties", "public", "ConfigID", "CatNum", "Vendor",
+    "ADDAVersion",
+}
+
+# Elements we know exist in real exports but do not extract yet. Each entry
+# documents the data loss so the gate reports it as a P1 coverage gap instead
+# of hiding it; move an element to HANDLED_ELEMENTS when its extractor lands.
+KNOWN_UNEXTRACTED_ELEMENTS = {
+    "MessageParameters": "preserved raw inside tag_data but not normalized or FTS-indexed",
+    "DataTypeFormats": "module profile CIP instance paths (ProSoft/EIP) lost",
+    "DataTypeFormat": "module profile CIP instance paths (ProSoft/EIP) lost",
+    "PL": "module profile PL subtree collapsed to text by _extended_properties",
+    "Version": "module profile PL/Version attributes lost",
+    "EngineeringUnits": "per-channel engineering units for analog modules lost",
+    "EngineeringUnit": "per-channel engineering units for analog modules lost",
+    "RedundancyInfo": "controller redundancy flag lost (operationally relevant)",
+    "Security": "controller security/change-detection metadata lost",
+    "SafetyInfo": "controller safety metadata lost",
+    "CST": "coordinated system time configuration lost",
+    "WallClockTime": "wall clock configuration lost",
+    "TimeSynchronize": "PTP time sync configuration lost",
+    "Trends": "trend definitions lost",
+    "DataLogs": "data log definitions lost",
+    "ChildPrograms": "parent/child program relationship lost",
+    "ChildProgram": "parent/child program relationship lost",
+    "RevisionNote": "AOI revision notes (author/date traceability) lost",
+    "HMICmd": "alarm HMI command configuration outside the alarms model",
+}
+
+
 class L5xParseError(RuntimeError):
     """Raised when an L5X file cannot be parsed as expected."""
 
@@ -496,9 +560,11 @@ def _source_nodes(root: ET.Element, counts: dict[str, int]) -> list[JsonDict]:
 
 
 def _coverage(root: ET.Element, project: JsonDict, counts: dict[str, int]) -> JsonDict:
-    fbd_source_nodes = _descendant_counts(root, "FBDContent")
+    element_counts = Counter(local_name(elem.tag) for elem in root.iter())
     sfc_source_nodes = _descendant_counts(root, "SFCContent")
-    fbd_node_source = sum(fbd_source_nodes[name] for name in ["IRef", "ORef", "ICon", "OCon", "Block", "AddOnInstruction", "TextBox"])
+    # Count every child of every FBD Sheet (minus sheet metadata) so node types
+    # the extractor does not know about still raise the missing count.
+    fbd_node_source = _fbd_sheet_child_count(root)
     sfc_node_source = sum(sfc_source_nodes[name] for name in ["Step", "Transition", "Action", "Branch"])
     rung_comment_count = sum(1 for unit in project["routine_units"] if unit.get("kind") == "rll_rung" and unit.get("comment"))
     aoi_routine_count = sum(1 for routine in project["routines"] if str(routine.get("owner") or "").startswith("AOI:"))
@@ -511,17 +577,87 @@ def _coverage(root: ET.Element, project: JsonDict, counts: dict[str, int]) -> Js
         "fbd_nodes": _surface("P0", fbd_node_source, len(project["fbd_nodes"])),
         "sfc_nodes": _surface("P0", sfc_node_source, len(project["sfc_nodes"])),
         "module_io_points": _surface("P0", io_tag_count, covered_io_tag_count),
-        "routine_markdown_comments": _surface("P0", rung_comment_count, rung_comment_count),
-        "aoi_routine_pages": _surface("P0", aoi_routine_count, aoi_routine_count),
+        # Independent XML numerators; previously these compared the pipeline's
+        # own output against itself and could never report a miss.
+        "routine_markdown_comments": _surface("P0", _rung_comment_source_count(root), rung_comment_count),
+        "aoi_routine_pages": _surface("P0", _aoi_routine_source_count(root), aoi_routine_count),
         "fbd_wires": _surface("P1", counts["fbd_wires"], len(project["fbd_wires"])),
         "sfc_links": _surface("P1", sfc_source_nodes["DirectedLink"], len(project["sfc_links"])),
-        "alarm_messages": _surface("P1", len(project["messages"]), len(project["messages"])),
+        "alarm_messages": _surface("P1", element_counts["Message"], len(project["messages"])),
+        "unextracted_elements": _unextracted_elements_surface(element_counts),
+        "unknown_elements": _unknown_elements_surface(element_counts),
     }
     missing = {"P0": [], "P1": []}
     for name, surface in surfaces.items():
         if surface["missing_count"]:
             missing.setdefault(surface["priority"], []).append(name)
     return {"counts": counts, "surfaces": surfaces, "missing": missing}
+
+
+def _fbd_sheet_child_count(root: ET.Element) -> int:
+    total = 0
+    for content in root.iter():
+        if local_name(content.tag) != "FBDContent":
+            continue
+        for sheet in content:
+            if local_name(sheet.tag) != "Sheet":
+                continue
+            # Wires and sheet descriptions have their own surfaces; everything
+            # else under a Sheet is expected to become an FBD node.
+            total += sum(1 for child in sheet if local_name(child.tag) not in {"Description", "Wire"})
+    return total
+
+
+def _rung_comment_source_count(root: ET.Element) -> int:
+    return sum(
+        1
+        for elem in root.iter()
+        if local_name(elem.tag) == "Rung" and xml_child(elem, "Comment") is not None
+    )
+
+
+def _aoi_routine_source_count(root: ET.Element) -> int:
+    total = 0
+    for aoi in root.iter():
+        if local_name(aoi.tag) != "AddOnInstructionDefinition":
+            continue
+        total += sum(1 for elem in aoi.iter() if local_name(elem.tag) == "Routine")
+    return total
+
+
+def _unknown_elements_surface(element_counts: Counter) -> JsonDict:
+    unknown = {
+        name: count
+        for name, count in sorted(element_counts.items())
+        if name not in HANDLED_ELEMENTS and name not in KNOWN_UNEXTRACTED_ELEMENTS
+    }
+    total = sum(unknown.values())
+    return {
+        "priority": "P0",
+        "source_count": total,
+        "covered_count": 0,
+        "missing_count": total,
+        "missing": [{"element": name, "count": count} for name, count in unknown.items()],
+    }
+
+
+def _unextracted_elements_surface(element_counts: Counter) -> JsonDict:
+    found = {
+        name: count
+        for name, count in sorted(element_counts.items())
+        if name in KNOWN_UNEXTRACTED_ELEMENTS
+    }
+    total = sum(found.values())
+    return {
+        "priority": "P1",
+        "source_count": total,
+        "covered_count": 0,
+        "missing_count": total,
+        "missing": [
+            {"element": name, "count": count, "note": KNOWN_UNEXTRACTED_ELEMENTS[name]}
+            for name, count in found.items()
+        ],
+    }
 
 
 def _surface(priority: str, source_count: int, covered_count: int) -> JsonDict:
