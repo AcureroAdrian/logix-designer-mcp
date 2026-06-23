@@ -37,8 +37,8 @@ DEFAULT_CALLS = [
     ("run_diagnostics", {}),
     ("sdk_status", {}),
     ("runtime_evidence_summary", {}),
-    ("list_runtime_evidence", {}),
-    ("simulate_runtime_read_preview", {"tags": "StartPB", "samples": 2}),
+    ("read_tags_now", {"path": "FAKE", "tags": "StartPB", "source": "fake"}),
+    ("list_runtime_sessions", {}),
 ]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

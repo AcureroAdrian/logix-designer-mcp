@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 
@@ -15,12 +15,11 @@ from test_parser_workspace import SIMPLE_L5X
 FIXED_NOW = datetime(2026, 6, 23, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def test_sdk_registry_is_named_and_rejects_dangerous_methods():
+def test_sdk_registry_is_export_only_and_rejects_dangerous_methods():
     result = sdk_adapter.validate_sdk_registry()
 
     assert result["ok"] is True
-    assert "sdk_export_l5x" in sdk_adapter.allowed_capability_names()
-    assert "sdk_read_tag_value_dint" in sdk_adapter.allowed_capability_names()
+    assert set(sdk_adapter.allowed_capability_names()) == {"sdk_export_l5x", "sdk_partial_export"}
     assert "sdk_upload_to_new_project" not in sdk_adapter.allowed_capability_names()
     assert "upload_to_new_project" not in sdk_adapter.allowed_sdk_method_names()
     assert "upload_to_new_project" in sdk_adapter.ADMIN_MANUAL_ONLY_SDK_METHOD_NAMES
@@ -29,15 +28,24 @@ def test_sdk_registry_is_named_and_rejects_dangerous_methods():
     assert all("*" not in name for name in sdk_adapter.allowed_capability_names())
     assert all("*" not in name for name in sdk_adapter.allowed_sdk_method_names())
 
-    assert sdk_adapter.is_capability_allowed("sdk_read_tag_value_dint")
-    assert not sdk_adapter.is_capability_allowed("sdk_read_tag_value_dint_extra")
-
-    with pytest.raises(sdk_adapter.SdkSecurityError):
-        sdk_adapter.capability_spec("sdk_read_tag_value_")
     with pytest.raises(sdk_adapter.SdkSecurityError):
         sdk_adapter.validate_public_surface(["download"])
     with pytest.raises(sdk_adapter.SdkSecurityError):
         sdk_adapter.validate_public_surface(["sdk_upload_to_new_project"])
+
+
+def test_sdk_runtime_read_capabilities_are_retired():
+    # Runtime reads moved to pycomm3 (debate row 20); the SDK must not expose
+    # any tag/mode/state read capability.
+    names = sdk_adapter.allowed_capability_names()
+    assert not any(name.startswith("sdk_read_") for name in names)
+    for retired in ("sdk_read_tag_value_dint", "sdk_read_controller_mode", "sdk_read_connected_state"):
+        assert not sdk_adapter.is_capability_allowed(retired)
+        with pytest.raises(sdk_adapter.SdkSecurityError):
+            sdk_adapter.capability_spec(retired)
+    assert not hasattr(sdk_adapter, "simulate_runtime_tag_stream")
+    assert not hasattr(sdk_adapter, "RuntimeReadPermission")
+    assert not hasattr(sdk_adapter, "build_runtime_evidence")
 
 
 def test_sdk_adapter_source_has_no_generic_dispatch():
@@ -59,81 +67,13 @@ def test_missing_sdk_fails_closed_without_import_side_effects():
         sdk_adapter.require_sdk_available(package_name)
 
 
-def test_runtime_permission_requires_exact_capability_and_online_grant():
-    permission = sdk_adapter.RuntimeReadPermission(
-        capability="sdk_read_tag_value_dint",
-        reason="unit test",
-        approved_by="Adrian Acurero",
-        max_tags=1,
-        expires_at=sdk_adapter.format_utc(FIXED_NOW + timedelta(minutes=5)),
-    )
-
-    assert sdk_adapter.validate_runtime_permission(
-        "sdk_read_tag_value_dint",
-        permission,
-        mode="OFFLINE",
-        tag_count=1,
-        now=FIXED_NOW,
-    )["ok"]
-
-    with pytest.raises(sdk_adapter.SdkPermissionError):
-        sdk_adapter.validate_runtime_permission(
-            "sdk_read_tag_value_real",
-            permission,
-            mode="OFFLINE",
-            tag_count=1,
-            now=FIXED_NOW,
-        )
-    with pytest.raises(sdk_adapter.SdkPermissionError):
-        sdk_adapter.validate_runtime_permission(
-            "sdk_read_tag_value_dint",
-            permission,
-            mode="ONLINE",
-            tag_count=1,
-            now=FIXED_NOW,
-        )
-    with pytest.raises(sdk_adapter.SdkPermissionError):
-        sdk_adapter.validate_runtime_permission(
-            "sdk_read_tag_value_dint",
-            permission,
-            mode="OFFLINE",
-            tag_count=2,
-            now=FIXED_NOW,
-        )
-    with pytest.raises(sdk_adapter.SdkPermissionError):
-        sdk_adapter.validate_runtime_permission(
-            "sdk_read_tag_value_dint",
-            permission,
-            mode="OFFLINE",
-            tag_count=1,
-            now=FIXED_NOW + timedelta(minutes=6),
-        )
-
-    online_permission = sdk_adapter.RuntimeReadPermission(
-        capability="sdk_read_controller_mode",
-        reason="confirmed runtime check",
-        approved_by="Adrian Acurero",
-        allow_online=True,
-        comm_path="secret/plant/path",
-        max_tags=1,
-        expires_at=sdk_adapter.format_utc(FIXED_NOW + timedelta(minutes=5)),
-    )
-    assert sdk_adapter.validate_runtime_permission(
-        "sdk_read_controller_mode",
-        online_permission,
-        mode="ONLINE",
-        tag_count=1,
-        now=FIXED_NOW,
-    )["ok"]
-
-
 def test_compact_sdk_log_redacts_raw_and_sensitive_fields(tmp_path: Path):
     result = sdk_adapter.write_compact_sdk_log(
         tmp_path,
         {
-            "operation": "read_controller_mode",
+            "operation": "export_l5x",
             "ok": True,
-            "mode": "RUN",
+            "mode": "OFFLINE",
             "duration_s": 1.25,
             "comm_path": "secret/plant/path",
             "stdout": "very verbose SDK output",
@@ -145,110 +85,14 @@ def test_compact_sdk_log_redacts_raw_and_sensitive_fields(tmp_path: Path):
     path = Path(result["log_handle"])
     assert path.is_relative_to(tmp_path / ".tmp" / "sdk_logs")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["operation"] == "read_controller_mode"
-    assert payload["mode"] == "RUN"
+    assert payload["operation"] == "export_l5x"
+    assert payload["mode"] == "OFFLINE"
     assert payload["redacted_keys_count"] == 3
     assert "comm_path" in payload["sensitive_keys_redacted"]
     serialized = path.read_text(encoding="utf-8")
     assert "secret/plant/path" not in serialized
     assert "very verbose SDK output" not in serialized
     assert "<Controller>huge</Controller>" not in serialized
-
-
-def test_runtime_evidence_stays_separate_from_ir_and_tracks_freshness(tmp_path: Path):
-    permission = sdk_adapter.RuntimeReadPermission(
-        capability="sdk_read_tag_value_dint",
-        reason="field value check",
-        approved_by="Adrian Acurero",
-        allow_online=True,
-        comm_path="secret/plant/path",
-        max_tags=1,
-    )
-    record = sdk_adapter.build_runtime_evidence(
-        evidence_type="tag_value",
-        source_fingerprint="abc123",
-        mode="ONLINE",
-        controller_identity={"name": "Demo", "serial": "1234"},
-        permission=permission,
-        retention_policy={"ttl_seconds": 30, "purge": "manual"},
-        ttl_seconds=30,
-        scope="Controller",
-        tag="ACCELERATION_RAMP_RATE",
-        comm_path="secret/plant/path",
-        value=36,
-        observed_at=FIXED_NOW,
-    )
-
-    assert record["freshness"] == "fresh"
-    assert record["comm_path_fingerprint"] == sdk_adapter.fingerprint_text("secret/plant/path")
-    assert "comm_path" not in record["permission"]
-
-    written = sdk_adapter.write_runtime_evidence(tmp_path, record, now=FIXED_NOW)
-    path = Path(written["path"])
-    assert path.is_relative_to(tmp_path / "runtime_evidence")
-    assert not path.is_relative_to(tmp_path / "ir")
-
-    fresh = sdk_adapter.read_runtime_evidence(path, now=FIXED_NOW + timedelta(seconds=29))
-    stale = sdk_adapter.read_runtime_evidence(path, now=FIXED_NOW + timedelta(seconds=31))
-    assert fresh["freshness"] == "fresh"
-    assert stale["freshness"] == "stale"
-    assert sdk_adapter.list_runtime_evidence(tmp_path, now=FIXED_NOW + timedelta(seconds=31))[0]["freshness"] == "stale"
-
-
-def test_simulated_runtime_stream_writes_moving_evidence(tmp_path: Path):
-    result = sdk_adapter.simulate_runtime_tag_stream(
-        tmp_path,
-        ["SWING_PORT_ARM_JS.Axis", "SWING_STBD_ARM_JS.Axis"],
-        samples=4,
-        interval_seconds=1,
-        data_type="REAL",
-        signal="sawtooth",
-        amplitude=10,
-        offset=50,
-        period_samples=4,
-        scope="Controller",
-        observed_start=FIXED_NOW,
-        ttl_seconds=30,
-    )
-
-    assert result["ok"] is True
-    assert result["source"] == sdk_adapter.SIMULATED_RUNTIME_SOURCE
-    assert result["record_count"] == 8
-    assert result["persisted"] is True
-    assert result["paths_preview"]
-    values = [item["value"] for item in result["records_preview"] if item["tag"] == "SWING_PORT_ARM_JS.Axis"]
-    assert len(set(values)) > 1
-
-    query = sdk_adapter.query_runtime_evidence(tmp_path, tag="SWING_PORT_ARM_JS.Axis", now=FIXED_NOW + timedelta(seconds=2))
-    assert query["total"] == 4
-    assert query["items"][0]["tag"] == "SWING_PORT_ARM_JS.Axis"
-    assert query["items"][0]["source"] == sdk_adapter.SIMULATED_RUNTIME_SOURCE
-    assert "comm_path" not in json.dumps(query)
-
-    stale = sdk_adapter.query_runtime_evidence(
-        tmp_path,
-        tag="SWING_PORT_ARM_JS.Axis",
-        freshness="stale",
-        now=FIXED_NOW + timedelta(seconds=35),
-    )
-    assert stale["total"] == 4
-
-
-def test_simulated_runtime_preview_does_not_write_evidence(tmp_path: Path):
-    result = sdk_adapter.simulate_runtime_tag_stream(
-        None,
-        ["TagA"],
-        samples=3,
-        data_type="DINT",
-        signal="triangle",
-        persist=False,
-        observed_start=FIXED_NOW,
-    )
-
-    assert result["ok"] is True
-    assert result["persisted"] is False
-    assert result["record_count"] == 3
-    assert not (tmp_path / "runtime_evidence").exists()
 
 
 def test_scratch_export_paths_are_confined_to_ignored_tmp(tmp_path: Path):
@@ -261,7 +105,7 @@ def test_scratch_export_paths_are_confined_to_ignored_tmp(tmp_path: Path):
         sdk_adapter.validate_scratch_output_path(tmp_path, "snapshot.ACD")
 
 
-def test_sdk_upload_is_not_registered_as_a_normal_mcp_tool(tmp_path: Path):
+def test_sdk_upload_is_not_registered_and_no_legacy_runtime_tools(tmp_path: Path):
     source = tmp_path / "demo.L5X"
     source.write_text(SIMPLE_L5X, encoding="utf-8")
     workspace = tmp_path / "demo.logix"
@@ -274,6 +118,8 @@ def test_sdk_upload_is_not_registered_as_a_normal_mcp_tool(tmp_path: Path):
     assert "sdk_upload_to_new_project" not in tool_names
     assert not tool_names & sdk_adapter.PUBLIC_DENIED_NAMES
     assert "sdk_status" in tool_names
+    # Legacy SDK runtime/evidence tools are gone; pycomm3 session tools replace them.
+    assert "simulate_runtime_read_preview" not in tool_names
+    assert "list_runtime_evidence" not in tool_names
     assert "runtime_evidence_summary" in tool_names
-    assert "list_runtime_evidence" in tool_names
-    assert "simulate_runtime_read_preview" in tool_names
+    assert {"read_tags_now", "start_runtime_capture", "list_runtime_sessions"} <= tool_names

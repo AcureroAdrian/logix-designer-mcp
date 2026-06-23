@@ -304,9 +304,5 @@ def test_cli_compact_commands_smoke(tmp_path: Path, capsys):
     assert '"required_unwired"' in capsys.readouterr().out
     assert main(["sdk-status"]) == 0
     assert '"optional_fail_closed"' in capsys.readouterr().out
-    assert main(["simulate-runtime", str(workspace), "--tag", "Motor_Run", "--samples", "2", "--signal", "square"]) == 0
-    assert '"simulate_runtime_tag_stream"' in capsys.readouterr().out
     assert main(["runtime-summary", str(workspace)]) == 0
-    assert '"simulated_sdk_runtime"' in capsys.readouterr().out
-    assert main(["runtime-evidence", str(workspace), "--tag", "Motor_Run", "--limit", "1"]) == 0
-    assert '"Motor_Run"' in capsys.readouterr().out
+    assert '"sessions"' in capsys.readouterr().out

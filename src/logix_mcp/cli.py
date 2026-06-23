@@ -121,30 +121,60 @@ def build_parser() -> argparse.ArgumentParser:
 
     sdk_status_cmd = sub.add_parser("sdk-status", help="Show optional SDK allowlist/fail-closed status.")
 
-    simulate = sub.add_parser("simulate-runtime", help="Generate simulated SDK-style runtime tag samples.")
-    simulate.add_argument("workspace", type=Path)
-    simulate.add_argument("--tag", action="append", required=True, help="Tag path to sample; repeat for multiple tags.")
-    simulate.add_argument("--samples", type=int, default=10)
-    simulate.add_argument("--interval-seconds", type=float, default=1.0)
-    simulate.add_argument("--data-type", default="REAL")
-    simulate.add_argument("--signal", choices=["sine", "sawtooth", "triangle", "square"], default="sine")
-    simulate.add_argument("--amplitude", type=float, default=100.0)
-    simulate.add_argument("--offset", type=float, default=0.0)
-    simulate.add_argument("--period-samples", type=int, default=20)
-    simulate.add_argument("--scope", default=None)
-    simulate.add_argument("--ttl-seconds", type=int, default=300)
-    simulate.add_argument("--preview-only", action="store_true", help="Return samples without writing runtime_evidence files.")
-
-    runtime_summary = sub.add_parser("runtime-summary", help="Summarize volatile runtime evidence for a workspace.")
+    runtime_summary = sub.add_parser("runtime-summary", help="Summarize runtime capture sessions for a workspace.")
     runtime_summary.add_argument("workspace", type=Path)
+    runtime_summary.add_argument("--session-id", default=None)
 
-    runtime_evidence = sub.add_parser("runtime-evidence", help="List compact runtime evidence rows.")
-    runtime_evidence.add_argument("workspace", type=Path)
-    runtime_evidence.add_argument("--tag", default=None)
-    runtime_evidence.add_argument("--scope", default=None)
-    runtime_evidence.add_argument("--freshness", choices=["fresh", "stale"], default=None)
-    runtime_evidence.add_argument("--limit", type=int, default=50)
-    runtime_evidence.add_argument("--offset", type=int, default=0)
+    runtime_read_now = sub.add_parser("runtime-read-now", help="Read tags once through the optional runtime reader.")
+    runtime_read_now.add_argument("workspace", type=Path)
+    runtime_read_now.add_argument("--path", required=True, help="pycomm3 route/path to the controller.")
+    runtime_read_now.add_argument("--tag", action="append", required=True, help="Tag path to read; repeat for multiple tags.")
+    runtime_read_now.add_argument("--source", choices=["pycomm3", "fake", "simulated"], default="pycomm3")
+
+    capture_start = sub.add_parser("runtime-capture-start", help="Start a background runtime capture subprocess.")
+    capture_start.add_argument("workspace", type=Path)
+    capture_start.add_argument("--path", required=True, help="pycomm3 route/path to the controller.")
+    capture_start.add_argument("--tag", action="append", required=True, help="Tag path to sample; repeat for multiple tags.")
+    capture_start.add_argument("--interval-ms", type=int, default=100)
+    capture_start.add_argument("--duration-seconds", type=float, default=60)
+    capture_start.add_argument("--source", choices=["pycomm3", "fake", "simulated"], default="pycomm3")
+    capture_start.add_argument("--session-id", default=None)
+
+    capture_run = sub.add_parser("runtime-capture-run", help=argparse.SUPPRESS)
+    capture_run.add_argument("workspace", type=Path)
+    capture_run.add_argument("--path", required=True)
+    capture_run.add_argument("--tag", action="append", required=True)
+    capture_run.add_argument("--interval-ms", type=int, default=100)
+    capture_run.add_argument("--duration-seconds", type=float, default=60)
+    capture_run.add_argument("--source", choices=["pycomm3", "fake", "simulated"], default="pycomm3")
+    capture_run.add_argument("--session-id", required=True)
+
+    capture_status = sub.add_parser("runtime-capture-status", help="Return runtime capture session status.")
+    capture_status.add_argument("workspace", type=Path)
+    capture_status.add_argument("--session-id", required=True)
+
+    capture_stop = sub.add_parser("runtime-capture-stop", help="Request a runtime capture subprocess to stop.")
+    capture_stop.add_argument("workspace", type=Path)
+    capture_stop.add_argument("--session-id", required=True)
+
+    runtime_sessions = sub.add_parser("runtime-sessions", help="List runtime capture sessions.")
+    runtime_sessions.add_argument("workspace", type=Path)
+    runtime_sessions.add_argument("--limit", type=int, default=50)
+    runtime_sessions.add_argument("--offset", type=int, default=0)
+
+    runtime_slice = sub.add_parser("runtime-slice", help="Read a compact downsampled runtime stream slice.")
+    runtime_slice.add_argument("workspace", type=Path)
+    runtime_slice.add_argument("--session-id", required=True)
+    runtime_slice.add_argument("--tag", default=None)
+    runtime_slice.add_argument("--max-points", type=int, default=200)
+    runtime_slice.add_argument("--offset", type=int, default=0)
+
+    runtime_changes = sub.add_parser("runtime-change-points", help="Read compact runtime value/error changes.")
+    runtime_changes.add_argument("workspace", type=Path)
+    runtime_changes.add_argument("--session-id", required=True)
+    runtime_changes.add_argument("--tag", default=None)
+    runtime_changes.add_argument("--limit", type=int, default=200)
+    runtime_changes.add_argument("--offset", type=int, default=0)
 
     return parser
 
@@ -242,40 +272,91 @@ def main(argv: list[str] | None = None) -> int:
 
         _print({"status": sdk_adapter.sdk_status(), "registry": sdk_adapter.validate_sdk_registry()})
         return 0
-    if args.command == "simulate-runtime":
-        from . import sdk_adapter
+    if args.command == "runtime-summary":
+        from . import runtime_store
+
+        if args.session_id:
+            _print(runtime_store.session_summary(args.workspace, args.session_id))
+        else:
+            _print(runtime_store.runtime_summary(args.workspace))
+        return 0
+    if args.command == "runtime-read-now":
+        from . import runtime_reader
+
+        _print(runtime_reader.read_tags_now(args.path, args.tag, source=args.source))
+        return 0
+    if args.command == "runtime-capture-start":
+        from . import runtime_reader
 
         _print(
-            sdk_adapter.simulate_runtime_tag_stream(
+            runtime_reader.start_capture_subprocess(
                 args.workspace,
-                args.tag,
-                samples=args.samples,
-                interval_seconds=args.interval_seconds,
-                data_type=args.data_type,
-                signal=args.signal,
-                amplitude=args.amplitude,
-                offset=args.offset,
-                period_samples=args.period_samples,
-                scope=args.scope,
-                ttl_seconds=args.ttl_seconds,
-                persist=not args.preview_only,
+                path=args.path,
+                tags=args.tag,
+                interval_ms=args.interval_ms,
+                duration_seconds=args.duration_seconds,
+                source=args.source,
+                session_id=args.session_id,
             )
         )
         return 0
-    if args.command == "runtime-summary":
-        from . import sdk_adapter
-
-        _print(sdk_adapter.runtime_evidence_summary(args.workspace))
-        return 0
-    if args.command == "runtime-evidence":
-        from . import sdk_adapter
+    if args.command == "runtime-capture-run":
+        from . import runtime_reader
 
         _print(
-            sdk_adapter.query_runtime_evidence(
+            runtime_reader.run_capture(
+                runtime_reader.RuntimeCaptureRequest(
+                    workspace=args.workspace,
+                    path=args.path,
+                    tags=tuple(args.tag),
+                    interval_ms=args.interval_ms,
+                    duration_seconds=args.duration_seconds,
+                    session_id=args.session_id,
+                    source=args.source,
+                    mode="OFFLINE" if args.source in {"fake", "simulated"} else "ONLINE",
+                )
+            )
+        )
+        return 0
+    if args.command == "runtime-capture-status":
+        from . import runtime_store
+
+        try:
+            _print(runtime_store.session_status(args.workspace, args.session_id))
+        except FileNotFoundError:
+            _print({"found": False, "session_id": args.session_id, "status": "starting"})
+        return 0
+    if args.command == "runtime-capture-stop":
+        from . import runtime_reader
+
+        _print(runtime_reader.stop_capture(args.workspace, args.session_id))
+        return 0
+    if args.command == "runtime-sessions":
+        from . import runtime_store
+
+        _print(runtime_store.list_sessions(args.workspace, limit=args.limit, offset=args.offset))
+        return 0
+    if args.command == "runtime-slice":
+        from . import runtime_store
+
+        _print(
+            runtime_store.read_stream_slice(
                 args.workspace,
+                args.session_id,
                 tag=args.tag,
-                scope=args.scope,
-                freshness=args.freshness,
+                max_points=args.max_points,
+                offset=args.offset,
+            )
+        )
+        return 0
+    if args.command == "runtime-change-points":
+        from . import runtime_store
+
+        _print(
+            runtime_store.runtime_change_points(
+                args.workspace,
+                args.session_id,
+                tag=args.tag,
                 limit=args.limit,
                 offset=args.offset,
             )

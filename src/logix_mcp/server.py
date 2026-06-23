@@ -389,6 +389,9 @@ def create_server(workspace: str | Path):
     def _tool():
         return mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 
+    def _runtime_control_tool():
+        return mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+
     @_tool()
     def project_summary() -> dict:
         return inspect_workspace(workspace_path)
@@ -896,63 +899,109 @@ def create_server(workspace: str | Path):
         return {"status": sdk_adapter.sdk_status(), "registry": sdk_adapter.validate_sdk_registry()}
 
     @_tool()
-    def runtime_evidence_summary() -> dict:
-        """Summarize volatile runtime evidence stored outside canonical IR."""
+    def runtime_evidence_summary(session_id: str | None = None) -> dict:
+        """Summarize runtime capture sessions (live pycomm3 reads) outside the IR."""
 
-        from . import sdk_adapter
+        from . import runtime_store
 
-        return sdk_adapter.runtime_evidence_summary(workspace_path)
+        if session_id:
+            return runtime_store.session_summary(workspace_path, session_id)
+        return runtime_store.runtime_summary(workspace_path)
 
     @_tool()
-    def list_runtime_evidence(
+    def read_tags_now(path: str, tags: str, source: str = "pycomm3") -> dict:
+        """Read tags once through pycomm3 or the fake runtime reader."""
+
+        from . import runtime_reader
+
+        tag_list = [item.strip() for item in tags.split(",") if item.strip()]
+        return runtime_reader.read_tags_now(path, tag_list, source=source)
+
+    @_runtime_control_tool()
+    def start_runtime_capture(
+        path: str,
+        tags: str,
+        interval_ms: int = 100,
+        duration_seconds: float = 60,
+        source: str = "pycomm3",
+    ) -> dict:
+        """Start a background runtime capture subprocess and return its session id."""
+
+        from . import runtime_reader
+
+        tag_list = [item.strip() for item in tags.split(",") if item.strip()]
+        return runtime_reader.start_capture_subprocess(
+            workspace_path,
+            path=path,
+            tags=tag_list,
+            interval_ms=interval_ms,
+            duration_seconds=duration_seconds,
+            source=source,
+        )
+
+    @_tool()
+    def runtime_capture_status(session_id: str) -> dict:
+        """Return status for a runtime capture session."""
+
+        from . import runtime_store
+
+        try:
+            return runtime_store.session_status(workspace_path, session_id)
+        except FileNotFoundError:
+            return {"found": False, "session_id": session_id, "status": "starting"}
+
+    @_runtime_control_tool()
+    def stop_runtime_capture(session_id: str) -> dict:
+        """Request a runtime capture subprocess to stop."""
+
+        from . import runtime_reader
+
+        return runtime_reader.stop_capture(workspace_path, session_id)
+
+    @_tool()
+    def list_runtime_sessions(limit: int = 50, offset: int = 0) -> dict:
+        """List runtime capture sessions as compact rows."""
+
+        from . import runtime_store
+
+        return runtime_store.list_sessions(workspace_path, limit=limit, offset=offset)
+
+    @_tool()
+    def read_runtime_stream_slice(
+        session_id: str,
         tag: str | None = None,
-        scope: str | None = None,
-        freshness: str | None = None,
-        limit: int = 50,
+        max_points: int = 200,
         offset: int = 0,
     ) -> dict:
-        """List compact runtime evidence rows from the volatile evidence store."""
+        """Return a compact downsampled slice from one runtime stream."""
 
-        from . import sdk_adapter
+        from . import runtime_store
 
-        return sdk_adapter.query_runtime_evidence(
+        return runtime_store.read_stream_slice(
             workspace_path,
+            session_id,
             tag=tag,
-            scope=scope,
-            freshness=freshness,
-            limit=limit,
+            max_points=max_points,
             offset=offset,
         )
 
     @_tool()
-    def simulate_runtime_read_preview(
-        tags: str,
-        samples: int = 5,
-        interval_seconds: float = 1.0,
-        data_type: str = "REAL",
-        signal: str = "sine",
-        amplitude: float = 100.0,
-        offset: float = 0.0,
-        period_samples: int = 20,
-        scope: str | None = None,
+    def runtime_change_points(
+        session_id: str,
+        tag: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
     ) -> dict:
-        """Preview simulated SDK-style runtime reads without writing evidence."""
+        """Return compact value/error change points for one runtime session."""
 
-        from . import sdk_adapter
+        from . import runtime_store
 
-        tag_list = [item.strip() for item in tags.split(",") if item.strip()]
-        return sdk_adapter.simulate_runtime_tag_stream(
+        return runtime_store.runtime_change_points(
             workspace_path,
-            tag_list,
-            samples=samples,
-            interval_seconds=interval_seconds,
-            data_type=data_type,
-            signal=signal,
-            amplitude=amplitude,
+            session_id,
+            tag=tag,
+            limit=limit,
             offset=offset,
-            period_samples=period_samples,
-            scope=scope,
-            persist=False,
         )
 
     return mcp

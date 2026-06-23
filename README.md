@@ -149,11 +149,14 @@ are never created unless `spill=true` is passed explicitly.
 - `decode_summary(tag, limit=50)`
 - `aoi_instance_bindings(instance=None, name=None, detail="summary", limit=10, spill=false)`
 - `sdk_status()` - optional SDK availability plus the fail-closed allowlist.
-- `runtime_evidence_summary()` - counts and latest values from volatile runtime evidence.
-- `list_runtime_evidence(tag=None, scope=None, freshness=None, limit=50, offset=0)` -
-  compact runtime evidence rows stored outside canonical IR.
-- `simulate_runtime_read_preview(tags, samples=5, ...)` - deterministic SDK-style
-  moving-value preview without writing evidence or touching a controller.
+- `runtime_evidence_summary(session_id=None)` - compact summary for runtime capture sessions.
+- `read_tags_now(path, tags, source="pycomm3")` - one-shot runtime snapshot.
+- `start_runtime_capture(path, tags, interval_ms=100, duration_seconds=60, source="pycomm3")` -
+  starts the CLI capture subprocess and returns a session id/PID.
+- `runtime_capture_status(session_id)` / `stop_runtime_capture(session_id)`.
+- `list_runtime_sessions(limit=50, offset=0)`.
+- `read_runtime_stream_slice(session_id, tag=None, max_points=200, offset=0)`.
+- `runtime_change_points(session_id, tag=None, limit=200, offset=0)`.
 
 ### Analysis
 
@@ -171,17 +174,24 @@ are never created unless `spill=true` is passed explicitly.
 - `.L5X` is the only supported source format in v1.
 - `.ACD`, `.L5K`, `.AML`, and `.RDF` are intentionally not parsed yet.
 - The extractor never modifies the input `.L5X`.
+- Optional pycomm3 runtime reads are isolated from the offline parser. The MCP
+  can do one-shot snapshots (`runtime-read-now`) or start a background capture
+  subprocess (`runtime-capture-start`) that writes
+  `runtime_evidence/sessions/<session_id>.manifest.json`,
+  `<session_id>.samples.jsonl`, and `<session_id>.state.json`.
 - Optional Logix Designer SDK support is fail-closed scaffolding only unless a
   named read-only capability is explicitly wired later. Upload/download,
   controller mode changes, tag writes, imports, safety/protect/lock, and SD-card
   operations are denied from the normal MCP surface. Runtime evidence belongs in
-  `runtime_evidence/` with TTL/freshness metadata, not in canonical `ir/`.
-- Simulated runtime reads can be exercised without joysticks or a PLC:
+  `runtime_evidence/`, not in canonical `ir/`.
+- Runtime smoke tests can be exercised without a PLC by using `--source fake`:
   ```powershell
-  python -m logix_mcp simulate-runtime .\Arnold_0058_029_062226.logix --tag SWING_PORT_ARM_JS.Axis --tag SWING_STBD_ARM_JS.Axis --samples 20 --signal sawtooth
+  python -m logix_mcp runtime-read-now .\Arnold_0058_029_062226.logix --path FAKE --tag Timer.ACC --source fake
+  python -m logix_mcp runtime-capture-start .\Arnold_0058_029_062226.logix --path FAKE --tag Timer.ACC --interval-ms 100 --duration-seconds 5 --source fake
+  python -m logix_mcp runtime-sessions .\Arnold_0058_029_062226.logix
+  python -m logix_mcp runtime-summary .\Arnold_0058_029_062226.logix --session-id <id>
+  python -m logix_mcp runtime-slice .\Arnold_0058_029_062226.logix --session-id <id> --tag Timer.ACC --max-points 200
   ```
-  This writes only volatile `runtime_evidence/` records unless `--preview-only`
-  is used.
 - Cross-references are classified from a per-instruction signature table
   (including ALMD/ALMA, which also emit a derived `<tag>.InAlarm` write) and
   from AOI parameter usage, and each row carries a `confidence` (`typed` vs
