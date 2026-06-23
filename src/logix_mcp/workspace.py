@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import hashlib
 import json
 import re
 import shutil
@@ -14,6 +15,7 @@ from .parser import parse_l5x
 
 
 JsonDict = dict[str, Any]
+SOURCE_FINGERPRINT_CHARS = 12
 
 
 def ingest_l5x(l5x_path: str | Path, out_dir: str | Path | None = None, copy_source: bool = True) -> dict:
@@ -62,20 +64,24 @@ def load_workspace(workspace: str | Path) -> dict:
     project_file = workspace_path / "ir" / "project.json"
     if not project_file.exists():
         raise FileNotFoundError(f"Logix workspace not found or not ingested: {workspace_path}")
+    project = json.loads(project_file.read_text(encoding="utf-8"))
+    _attach_workspace_identity(project, workspace_path)
     return {
         "workspace": str(workspace_path),
-        "project": json.loads(project_file.read_text(encoding="utf-8")),
+        "project": project,
     }
 
 
 def inspect_workspace(workspace: str | Path) -> dict:
     loaded = load_workspace(workspace)
     root = Path(loaded["workspace"])
+    project = dict(loaded["project"])
+    _attach_workspace_identity(project, root)
     files = {}
     for path in sorted((root / "ir").glob("*.jsonl")):
         files[path.stem] = _count_jsonl(path)
     return {
-        **loaded["project"],
+        **project,
         "files": files,
         "has_coverage": (root / "ir" / "coverage.json").exists(),
     }
@@ -308,6 +314,7 @@ def _manifest(project: dict, source: Path, workspace: Path) -> dict:
         "format": "logix-mcp-workspace",
         "version": 2,
         "source_path": str(source),
+        "source_fingerprint": source_fingerprint(source),
         "workspace": str(workspace),
         "controller": project["controller"].get("name"),
         "datasets": sorted(_jsonl_datasets(project).keys()),
@@ -317,7 +324,7 @@ def _manifest(project: dict, source: Path, workspace: Path) -> dict:
 
 
 def _project_summary(project: dict, source: Path, workspace: Path) -> dict:
-    return {
+    summary = {
         "source_path": str(source),
         "workspace": str(workspace),
         "root": project["root"],
@@ -326,6 +333,98 @@ def _project_summary(project: dict, source: Path, workspace: Path) -> dict:
         "coverage": project["coverage"],
         "warnings": project["warnings"],
     }
+    _attach_workspace_identity(summary, workspace)
+    return summary
+
+
+def workspace_identity(workspace: str | Path, project: dict | None = None) -> dict:
+    """Return source path, export date, and a short fingerprint for a workspace."""
+
+    workspace_path = Path(workspace).resolve()
+    if project is None:
+        project_file = workspace_path / "ir" / "project.json"
+        if not project_file.exists():
+            raise FileNotFoundError(f"Logix workspace not found or not ingested: {workspace_path}")
+        project = json.loads(project_file.read_text(encoding="utf-8"))
+    return _workspace_identity(project, workspace_path)
+
+
+def source_fingerprint(path: str | Path, length: int = SOURCE_FINGERPRINT_CHARS) -> str:
+    """Return a short SHA-256 fingerprint for a source file."""
+
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    value = digest.hexdigest()
+    return value[:length] if length > 0 else value
+
+
+def _attach_workspace_identity(project: dict, workspace: Path) -> None:
+    identity = _workspace_identity(project, workspace)
+    project["source_fingerprint"] = identity["fingerprint"]
+    project["workspace_fingerprint"] = identity["fingerprint"]
+    project["identity"] = identity
+
+
+def _workspace_identity(project: dict, workspace: Path | None = None) -> dict:
+    """Return a compact identity row for stale-workspace checks."""
+
+    root = project.get("root") or {}
+    controller = project.get("controller") or {}
+    workspace_path = Path(workspace).resolve() if workspace is not None else None
+    payload = {
+        "source_path": project.get("source_path"),
+        "export_date": root.get("ExportDate"),
+        "target_name": root.get("TargetName") or controller.get("name"),
+        "processor_type": controller.get("processor_type"),
+        "project_sn": controller.get("project_sn"),
+        "counts": project.get("counts") or {},
+    }
+    source = _source_file_for_fingerprint(project, workspace_path)
+    fingerprint = _safe_source_fingerprint(source) if source is not None else None
+    fingerprint_kind = "source_sha256_12" if fingerprint else "metadata_sha256_12"
+    if fingerprint is None:
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:SOURCE_FINGERPRINT_CHARS]
+    return {
+        "source_path": payload["source_path"],
+        "workspace": project.get("workspace") or (str(workspace_path) if workspace_path is not None else None),
+        "export_date": payload["export_date"],
+        "controller": payload["target_name"],
+        "fingerprint": fingerprint,
+        "fingerprint_kind": fingerprint_kind,
+    }
+
+
+def _source_file_for_fingerprint(project: dict, workspace: Path | None) -> Path | None:
+    candidates: list[Path] = []
+    source_path = project.get("source_path")
+    if source_path:
+        source = Path(str(source_path))
+        candidates.append(source)
+        if workspace is not None:
+            candidates.append(workspace / "source" / "original" / source.name)
+    if workspace is not None:
+        original = workspace / "source" / "original"
+        if original.exists():
+            candidates.extend(sorted(original.glob("*.L5X")))
+            candidates.extend(sorted(original.glob("*.l5x")))
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _safe_source_fingerprint(path: Path) -> str | None:
+    try:
+        return source_fingerprint(path)
+    except OSError:
+        return None
 
 
 def _jsonl_datasets(project: dict) -> dict[str, list[dict]]:

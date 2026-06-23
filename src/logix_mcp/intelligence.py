@@ -193,7 +193,7 @@ def get_routine_slice(
 
     fbd_by_sheet = _fbd_by_sheet(context)
     items = [_compact_unit(units[index], fbd_by_sheet) for index in selected_indexes[:50]]
-    return {
+    result = {
         "found": True,
         "routine": _compact_routine(context["routine"]),
         "selection": {
@@ -208,6 +208,54 @@ def get_routine_slice(
         "truncated": len(selected_indexes) > len(items),
         "items": items,
     }
+    if _routine_context_touches_sfc(context, items):
+        limits = coverage_limits(workspace, "sfc")
+        if limits:
+            result["limits"] = limits
+    return result
+
+
+def coverage_limits(workspace: str | Path, area: str | None = None) -> list[str]:
+    """Return compact extraction-coverage caveats for a specific analysis area."""
+
+    coverage = _read_json_file(Path(workspace) / "ir" / "coverage.json") or {}
+    surfaces = coverage.get("surfaces") if isinstance(coverage, dict) else {}
+    missing = coverage.get("missing") if isinstance(coverage, dict) else {}
+    if not isinstance(surfaces, dict):
+        return []
+
+    area_key = (area or "").lower()
+    limits: list[str] = []
+    if area_key in {"sfc", "routine", "routine_sfc"}:
+        for name in ("sfc_nodes", "sfc_links"):
+            surface = surfaces.get(name) or {}
+            missing_count = int(surface.get("missing_count") or 0)
+            if missing_count > 0 or name in (missing.get("P0") or []) or name in (missing.get("P1") or []):
+                limits.append(
+                    f"coverage_gap:{name}:{surface.get('covered_count', 0)}/{surface.get('source_count', 0)} "
+                    f"covered, missing {missing_count}, priority {surface.get('priority') or 'unknown'}"
+                )
+    if area_key in {"sfc", "routine", "routine_sfc", "project"}:
+        surface = surfaces.get("unextracted_elements") or {}
+        missing_count = int(surface.get("missing_count") or 0)
+        if missing_count > 0:
+            limits.append(
+                f"coverage_gap:unextracted_elements:{surface.get('covered_count', 0)}/{surface.get('source_count', 0)} "
+                f"covered, missing {missing_count}, priority {surface.get('priority') or 'unknown'}"
+            )
+    return limits
+
+
+def _routine_context_touches_sfc(context: JsonDict, items: list[JsonDict] | None = None) -> bool:
+    routine = context.get("routine") or {}
+    if str(routine.get("language") or "").upper() == "SFC":
+        return True
+    if context.get("sfc_nodes") or context.get("sfc_links"):
+        return True
+    for item in items or []:
+        if str(item.get("kind") or "").lower().startswith("sfc") or str(item.get("language") or "").upper() == "SFC":
+            return True
+    return False
 
 
 def get_fbd_sheet(

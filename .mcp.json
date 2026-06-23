@@ -6,7 +6,7 @@
         "-m",
         "logix_mcp",
         "serve",
-        ".\\Arnold_0058_020_060926.logix"
+        ".\\Arnold_0058_029_062226.logix"
       ]
     }
   }

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import sys
+import json
 
 from .diagnostics import run_diagnostics as run_diagnostics_impl
 from .graph import (
@@ -17,6 +20,7 @@ from .intelligence import (
     decode_summary as analysis_decode_summary,
     exists as analysis_exists,
     get_fbd_sheet as analysis_get_fbd_sheet,
+    coverage_limits as analysis_coverage_limits,
     get_operand_context as analysis_get_operand_context,
     get_routine_slice as analysis_get_routine_slice,
     resolve_alarm as analysis_resolve_alarm,
@@ -40,10 +44,12 @@ from .workspace import (
     read_jsonl,
     search_entities as workspace_search_entities,
     search_logic as search_logic_rows,
+    workspace_identity,
 )
 
 
 SUMMARY_TEXT_LIMIT = 200
+RESULT_SPILL_THRESHOLD = 50_000
 _BULKY_FIELDS = {"body", "attributes"}
 
 # Per-kind whitelists keep listing rows lean enough that a default page of 200
@@ -147,6 +153,199 @@ def not_found(workspace: str | Path, kind: str, name: str) -> dict:
     }
 
 
+def resolve_alias(canonical_name: str, canonical_value: object | None = None, **aliases: object | None) -> str | dict:
+    values = {
+        name: str(value)
+        for name, value in {canonical_name: canonical_value, **aliases}.items()
+        if value not in (None, "")
+    }
+    if not values:
+        return {"error": f"Missing required argument: {canonical_name}", "accepted_names": [canonical_name, *aliases.keys()]}
+    unique = {value for value in values.values()}
+    if len(unique) > 1:
+        return {"error": "Conflicting aliases", "values": values}
+    return next(iter(unique))
+
+
+def validate_detail(detail: str) -> dict | None:
+    if detail in {"summary", "detail", "full"}:
+        return None
+    return {"error": "Unsupported detail", "detail": detail, "accepted": ["summary", "detail", "full"]}
+
+
+def json_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def finish_result(result: dict, *, workspace: Path, tool: str, truncated: bool = False, spill: bool = False) -> dict:
+    size = json_size(result)
+    if spill and size > RESULT_SPILL_THRESHOLD:
+        digest = hashlib.sha256(json.dumps(result, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:12]
+        spill_dir = workspace.parent / ".tmp" / "logix_mcp_spill"
+        spill_dir.mkdir(parents=True, exist_ok=True)
+        spill_path = spill_dir / f"{tool}-{digest}.json"
+        spill_path.write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+        return {"tool": tool, "spilled": True, "spill_path": str(spill_path), "result_size": size, "truncated": True}
+    result["result_size"] = size
+    result["truncated"] = bool(truncated)
+    return result
+
+
+def compact_comment(row: dict) -> dict:
+    return {
+        key: value
+        for key, value in {
+            "target": row.get("target") or row.get("tag_name"),
+            "text": _clip_text(row.get("text") or row.get("comment") or row.get("description")),
+        }.items()
+        if value not in (None, "")
+    }
+
+
+def compact_data(row: dict) -> dict:
+    return {
+        key: value
+        for key, value in {
+            "owner": row.get("owner") or row.get("owner_name"),
+            "element": row.get("element"),
+            "format": row.get("format"),
+            "raw_text": _clip_text(row.get("raw_text"), 180),
+        }.items()
+        if value not in (None, "")
+    }
+
+
+def _clip_text(value: object, size: int = 240) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    return text if len(text) <= size else text[: size - 3] + "..."
+
+
+def _project_rows(rows: list[dict], limit: int) -> list[dict]:
+    return [summarize_row(row) for row in rows[:limit]]
+
+
+def tag_context_view(bundle: dict, detail: str) -> tuple[dict, bool]:
+    comments = list(bundle.get("comments") or [])
+    tag_comments = list(bundle.get("tag_comments") or [])
+    data = list(bundle.get("data") or [])
+    references = list(bundle.get("references") or [])
+    limits = {"summary": (5, 10, 10, 10), "detail": (25, 50, 50, 50)}[detail]
+    comment_limit, tag_comment_limit, data_limit, ref_limit = limits
+    truncated = any(
+        [
+            len(comments) > comment_limit,
+            len(tag_comments) > tag_comment_limit,
+            len(data) > data_limit,
+            len(references) > ref_limit,
+        ]
+    )
+    return (
+        {
+            "detail": detail,
+            "tag": summarize_row(bundle.get("tag") or {}),
+            "counts": {
+                "comments": len(comments),
+                "tag_comments": len(tag_comments),
+                "data": len(data),
+                "references": len(references),
+            },
+            "comments": [compact_comment(row) for row in comments[:comment_limit]],
+            "tag_comments": [compact_comment(row) for row in tag_comments[:tag_comment_limit]],
+            "data_preview": [compact_data(row) for row in data[:data_limit]],
+            "references": _project_rows(references, ref_limit),
+            "next_calls": [
+                "get_operand_context(<tag>, detail='summary')",
+                "cross_reference(<tag>, mode='members')",
+                "get_tag_context(<tag>, detail='full') for the legacy raw bundle",
+            ],
+        },
+        truncated,
+    )
+
+
+def aoi_context_view(bundle: dict, detail: str) -> tuple[dict, bool]:
+    parameters = list(bundle.get("parameters") or [])
+    local_tags = list(bundle.get("local_tags") or [])
+    routines = list(bundle.get("routines") or [])
+    limits = {"summary": (20, 20, 10), "detail": (100, 100, 50)}[detail]
+    param_limit, local_limit, routine_limit = limits
+    truncated = len(parameters) > param_limit or len(local_tags) > local_limit or len(routines) > routine_limit
+    return (
+        {
+            "detail": detail,
+            "definition": summarize_row(bundle.get("definition") or {}),
+            "counts": {"parameters": len(parameters), "local_tags": len(local_tags), "routines": len(routines)},
+            "parameters": _project_rows(parameters, param_limit),
+            "local_tags": _project_rows(local_tags, local_limit),
+            "routines": _project_rows(routines, routine_limit),
+            "next_calls": ["get_aoi_context(<name>, detail='full') for the legacy raw bundle"],
+        },
+        truncated,
+    )
+
+
+def module_context_view(bundle: dict, detail: str) -> tuple[dict, bool]:
+    ports = list(bundle.get("ports") or [])
+    connections = [{key: value for key, value in row.items() if key != "io_tags"} for row in list(bundle.get("connections") or [])]
+    io_tags = list(bundle.get("io_tags") or [])
+    io_points = list(bundle.get("io_points") or [])
+    limits = {"summary": (10, 10, 20, 50), "detail": (50, 50, 100, 250)}[detail]
+    port_limit, conn_limit, tag_limit, point_limit = limits
+    truncated = len(ports) > port_limit or len(connections) > conn_limit or len(io_tags) > tag_limit or len(io_points) > point_limit
+    return (
+        {
+            "detail": detail,
+            "module": summarize_row(bundle.get("module") or {}),
+            "counts": {"ports": len(ports), "connections": len(connections), "io_tags": len(io_tags), "io_points": len(io_points)},
+            "ports": _project_rows(ports, port_limit),
+            "connections": _project_rows(connections, conn_limit),
+            "io_tags": _project_rows(io_tags, tag_limit),
+            "io_points": _project_rows(io_points, point_limit),
+            "next_calls": ["get_module_context(<module>, detail='full') for embedded connection io_tags"],
+        },
+        truncated,
+    )
+
+
+def aoi_bindings_view(result: dict, detail: str) -> tuple[dict, bool]:
+    instances = list(result.get("instances") or [])
+    out_instances = []
+    truncated = False
+    binding_limit = 0 if detail == "summary" else 25
+    for instance in instances:
+        row = {key: instance.get(key) for key in ("instance", "aoi", "routine", "program", "owner", "sheet", "node_id", "evidence_ref", "summary") if instance.get(key) not in (None, "")}
+        bindings = list(instance.get("bindings") or [])
+        if detail == "detail":
+            row["bindings"] = bindings[:binding_limit]
+            if len(bindings) > binding_limit:
+                row["bindings_truncated"] = len(bindings) - binding_limit
+                truncated = True
+        elif bindings:
+            truncated = True
+        out_instances.append(row)
+    return (
+        {
+            "detail": detail,
+            "query": result.get("query"),
+            "found": result.get("found"),
+            "instance_count": len(instances),
+            "instances": out_instances,
+            "limits": result.get("limits") or [],
+            "next_calls": result.get("next_calls") or [],
+        },
+        truncated,
+    )
+
+
+def routine_touches_sfc(result: dict) -> bool:
+    routine = result.get("routine") or {}
+    if str(routine.get("language") or "").upper() == "SFC":
+        return True
+    return bool(result.get("sfc_nodes") or result.get("sfc_links"))
+
+
 def create_server(workspace: str | Path):
     try:
         from mcp.server.fastmcp import FastMCP
@@ -197,11 +396,19 @@ def create_server(workspace: str | Path):
         return not_found(workspace_path, "tag", name)
 
     @_tool()
-    def get_tag_context(name: str, scope: str | None = None) -> dict:
+    def get_tag_context(name: str, scope: str | None = None, detail: str = "summary", spill: bool = False) -> dict:
         """Return a tag with descriptions/comments, data/defaults, and references."""
 
+        detail_error = validate_detail(detail)
+        if detail_error:
+            return detail_error
         bundle = get_tag_bundle(workspace_path, name, scope)
-        return bundle if bundle else not_found(workspace_path, "tag", name)
+        if not bundle:
+            return not_found(workspace_path, "tag", name)
+        if detail == "full":
+            return bundle
+        result, truncated = tag_context_view(bundle, detail)
+        return finish_result(result, workspace=workspace_path, tool="get_tag_context", truncated=truncated, spill=spill)
 
     @_tool()
     def list_udts(limit: int = 200, offset: int = 0) -> dict:
@@ -282,7 +489,7 @@ def create_server(workspace: str | Path):
                 if isinstance(value, str) and value:
                     row[text_key] = value if len(value) <= 300 else value[:300] + "..."
             unit_rows.append(row)
-        return {
+        summary = {
             "routine": summarize_row(result.get("routine") or {}),
             "counts": {key: len(result.get(key) or []) for key in ("units", "xrefs", "fbd_nodes", "fbd_wires", "sfc_nodes", "sfc_links")},
             "units": unit_rows,
@@ -294,6 +501,11 @@ def create_server(workspace: str | Path):
                 "get_routine_context(..., detail='full') for raw rows",
             ],
         }
+        if routine_touches_sfc(result):
+            limits = analysis_coverage_limits(workspace_path, "sfc")
+            if limits:
+                summary["limits"] = limits
+        return summary
 
     @_tool()
     def list_aois(limit: int = 200, offset: int = 0) -> dict:
@@ -320,10 +532,19 @@ def create_server(workspace: str | Path):
         return summary
 
     @_tool()
-    def get_aoi_context(name: str) -> dict | None:
+    def get_aoi_context(name: str, detail: str = "summary", spill: bool = False) -> dict | None:
         """Return an AOI definition, parameters, local tags, and routines."""
 
-        return get_aoi_bundle(workspace_path, name)
+        detail_error = validate_detail(detail)
+        if detail_error:
+            return detail_error
+        bundle = get_aoi_bundle(workspace_path, name)
+        if bundle is None:
+            return not_found(workspace_path, "aoi", name)
+        if detail == "full":
+            return bundle
+        result, truncated = aoi_context_view(bundle, detail)
+        return finish_result(result, workspace=workspace_path, tool="get_aoi_context", truncated=truncated, spill=spill)
 
     @_tool()
     def list_modules(limit: int = 100, offset: int = 0) -> dict:
@@ -333,10 +554,22 @@ def create_server(workspace: str | Path):
         return envelope(rows, limit, offset)
 
     @_tool()
-    def get_module_context(module: str) -> dict | None:
+    def get_module_context(module: str | None = None, name: str | None = None, detail: str = "summary", spill: bool = False) -> dict | None:
         """Return a module with ports, connections, I/O tags, and point comments."""
 
-        return get_module_bundle(workspace_path, module)
+        resolved = resolve_alias("module", module, name=name)
+        if isinstance(resolved, dict):
+            return resolved
+        detail_error = validate_detail(detail)
+        if detail_error:
+            return detail_error
+        bundle = get_module_bundle(workspace_path, resolved)
+        if bundle is None:
+            return not_found(workspace_path, "module", resolved)
+        if detail == "full":
+            return bundle
+        result, truncated = module_context_view(bundle, detail)
+        return finish_result(result, workspace=workspace_path, tool="get_module_context", truncated=truncated, spill=spill)
 
     @_tool()
     def list_entities(kind: str | None = None, limit: int = 100, offset: int = 0) -> dict:
@@ -349,13 +582,19 @@ def create_server(workspace: str | Path):
         return row if row else not_found(workspace_path, "entity", entity_id)
 
     @_tool()
-    def search_entities(pattern: str, limit: int = 50, offset: int = 0) -> dict:
-        rows = workspace_search_entities(workspace_path, pattern, offset + limit + 1)
+    def search_entities(pattern: str | None = None, query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+        resolved = resolve_alias("pattern", pattern, query=query)
+        if isinstance(resolved, dict):
+            return resolved
+        rows = workspace_search_entities(workspace_path, resolved, offset + limit + 1)
         return probe_envelope(rows, limit, offset)
 
     @_tool()
-    def search_logic(pattern: str, limit: int = 50, offset: int = 0) -> dict:
-        rows = search_logic_rows(workspace_path, pattern, offset + limit + 1)
+    def search_logic(pattern: str | None = None, query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+        resolved = resolve_alias("pattern", pattern, query=query)
+        if isinstance(resolved, dict):
+            return resolved
+        rows = search_logic_rows(workspace_path, resolved, offset + limit + 1)
         return probe_envelope(rows, limit, offset)
 
     @_tool()
@@ -406,7 +645,9 @@ def create_server(workspace: str | Path):
 
     @_tool()
     def cross_reference(
-        symbol: str,
+        symbol: str | None = None,
+        name: str | None = None,
+        operand: str | None = None,
         mode: str = "exact",
         access: str | None = None,
         destructive: bool | None = None,
@@ -416,7 +657,10 @@ def create_server(workspace: str | Path):
     ) -> dict:
         """Logix-style cross reference with destructive classification and snippets."""
 
-        return analysis_cross_reference(workspace_path, symbol, mode=mode, access=access, destructive=destructive, scope=scope, limit=limit, offset=offset)
+        resolved = resolve_alias("symbol", symbol, name=name, operand=operand)
+        if isinstance(resolved, dict):
+            return resolved
+        return analysis_cross_reference(workspace_path, resolved, mode=mode, access=access, destructive=destructive, scope=scope, limit=limit, offset=offset)
 
     @_tool()
     def find_references(symbol: str, limit: int = 200, offset: int = 0) -> dict:
@@ -454,10 +698,20 @@ def create_server(workspace: str | Path):
         return analysis_decode_summary(workspace_path, tag, limit=limit)
 
     @_tool()
-    def aoi_instance_bindings(instance: str, limit: int = 10) -> dict:
+    def aoi_instance_bindings(instance: str | None = None, name: str | None = None, detail: str = "summary", limit: int = 10, spill: bool = False) -> dict:
         """Return FBD AOI instance pin bindings, including unwired parameters."""
 
-        return analysis_aoi_instance_bindings(workspace_path, instance, limit=limit)
+        resolved = resolve_alias("instance", instance, name=name)
+        if isinstance(resolved, dict):
+            return resolved
+        detail_error = validate_detail(detail)
+        if detail_error:
+            return detail_error
+        result = analysis_aoi_instance_bindings(workspace_path, resolved, limit=limit)
+        if detail == "full":
+            return result
+        view, truncated = aoi_bindings_view(result, detail)
+        return finish_result(view, workspace=workspace_path, tool="aoi_instance_bindings", truncated=truncated, spill=spill)
 
     @_tool()
     def tag_producers_consumers(name: str) -> dict:
@@ -472,10 +726,13 @@ def create_server(workspace: str | Path):
         return graph_impact_of(workspace_path, name, max_depth=max_depth, limit=limit)
 
     @_tool()
-    def io_trace(name: str) -> dict:
+    def io_trace(name: str | None = None, symbol: str | None = None) -> dict:
         """Resolve a tag's alias chain to physical I/O points, logic, and alarms."""
 
-        return graph_io_trace(workspace_path, name)
+        resolved = resolve_alias("name", name, symbol=symbol)
+        if isinstance(resolved, dict):
+            return resolved
+        return graph_io_trace(workspace_path, resolved)
 
     @_tool()
     def call_graph(routine: str | None = None, program: str | None = None) -> dict:
@@ -499,4 +756,17 @@ def create_server(workspace: str | Path):
 
 
 def run_server(workspace: str | Path) -> None:
-    create_server(workspace).run()
+    workspace_path = Path(workspace).resolve()
+    try:
+        identity = workspace_identity(workspace_path)
+        print(
+            "logix-mcp serving "
+            f"{workspace_path.name} "
+            f"(source={identity.get('source_path') or 'unknown'}, "
+            f"export={identity.get('export_date') or 'unknown'}, "
+            f"fingerprint={identity.get('fingerprint') or 'unknown'})",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # pragma: no cover - startup should still surface the real server error
+        print(f"logix-mcp serving {workspace_path.name} (identity unavailable: {exc})", file=sys.stderr)
+    create_server(workspace_path).run()

@@ -109,12 +109,16 @@ All tools are read-only (`readOnlyHint`); ingestion is CLI-only
 (`python -m logix_mcp ingest`). `list_*` tools return a uniform envelope
 `{items, total, offset, limit, has_more, truncated}` with summary rows (never
 raw bodies/members/nodes); failed lookups return `{found: false, did_you_mean}`.
+Deep context tools default to `detail="summary"` and support
+`detail="detail"` for bounded row samples or `detail="full"` for the raw legacy
+bundle. Bounded deep responses include `result_size` and `truncated`; spill files
+are never created unless `spill=true` is passed explicitly.
 
 - `project_summary()`
 - `coverage_report()`
 - `list_tags(scope=None, data_type=None, limit=100, offset=0)`
 - `get_tag(name, scope=None)`
-- `get_tag_context(name, scope=None)`
+- `get_tag_context(name, scope=None, detail="summary", spill=false)`
 - `list_udts(limit=200, offset=0)`
 - `get_udt(name, detail="summary")`
 - `list_programs(limit=200, offset=0)`
@@ -124,33 +128,33 @@ raw bodies/members/nodes); failed lookups return `{found: false, did_you_mean}`.
 - `get_routine_context(program=None, routine=None, routine_id=None, detail="summary", unit_limit=100)`
 - `list_aois(limit=200, offset=0)`
 - `get_aoi(name, detail="summary")`
-- `get_aoi_context(name)`
+- `get_aoi_context(name, detail="summary", spill=false)`
 - `list_modules(limit=100, offset=0)`
-- `get_module_context(module)`
+- `get_module_context(module=None, name=None, detail="summary", spill=false)`
 - `list_entities(kind=None, limit=100, offset=0)`
 - `get_entity(entity_id)`
-- `search_entities(pattern, limit=50, offset=0)`
-- `search_logic(pattern, limit=50, offset=0)`
+- `search_entities(pattern=None, query=None, limit=50, offset=0)`
+- `search_logic(pattern=None, query=None, limit=50, offset=0)`
 - `search_project(query, kinds=None, scope=None, limit=20, offset=0)`
 - `exists(query, kinds=None, scope=None)`
 - `get_operand_context(operand, scope=None, detail="summary")`
 - `get_routine_slice(program=None, routine=None, routine_id=None, sheet=None, unit_id=None, query=None, before=1, after=1)`
 - `get_fbd_sheet(program=None, routine=None, routine_id=None, sheet=None, form="pseudo", limit=100)`
-- `cross_reference(symbol, mode="exact", access=None, destructive=None, scope=None, limit=50, offset=0)`
+- `cross_reference(symbol=None, name=None, operand=None, mode="exact", access=None, destructive=None, scope=None, limit=50, offset=0)`
 - `find_references(symbol, limit=200, offset=0)`
 - `trace_signal(symbol, direction="upstream", max_depth=4, limit=100)`
 - `triage_issue(issue_text, limit=5)`
 - `scope_metadata(issue_text=None)`
 - `resolve_alarm(name_or_class, limit=10)`
 - `decode_summary(tag, limit=50)`
-- `aoi_instance_bindings(instance, limit=10)`
+- `aoi_instance_bindings(instance=None, name=None, detail="summary", limit=10, spill=false)`
 
 ### Analysis
 
 - `tag_producers_consumers(name)` - routines that write a tag vs read it.
 - `impact_of(name, max_depth=3, limit=300)` - transitive change propagation
   from a tag through the logic (affected routines, tags, and alarms).
-- `io_trace(name)` - resolve a tag's alias chain to physical I/O, logic, alarms.
+- `io_trace(name=None, symbol=None)` - resolve a tag's alias chain to physical I/O, logic, alarms.
 - `call_graph(routine=None, program=None)` - callers/callees of a routine, or
   the task/program scheduling tree (including unscheduled programs).
 - `run_diagnostics(rules=None, severity=None, limit=50)` - prioritized
@@ -161,6 +165,11 @@ raw bodies/members/nodes); failed lookups return `{found: false, did_you_mean}`.
 - `.L5X` is the only supported source format in v1.
 - `.ACD`, `.L5K`, `.AML`, and `.RDF` are intentionally not parsed yet.
 - The extractor never modifies the input `.L5X`.
+- Optional Logix Designer SDK support is fail-closed scaffolding only unless a
+  named read-only capability is explicitly wired later. Upload/download,
+  controller mode changes, tag writes, imports, safety/protect/lock, and SD-card
+  operations are denied from the normal MCP surface. Runtime evidence belongs in
+  `runtime_evidence/` with TTL/freshness metadata, not in canonical `ir/`.
 - Cross-references are classified from a per-instruction signature table
   (including ALMD/ALMA, which also emit a derived `<tag>.InAlarm` write) and
   from AOI parameter usage, and each row carries a `confidence` (`typed` vs

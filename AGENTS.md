@@ -120,9 +120,11 @@ fuente del repo.
   nuevos) y `unextracted_elements` (P1: elementos conocidos pero todavia no
   modelados, cada uno con su nota).
 - Los `list_*` devuelven un envelope `{items, total, offset, limit, has_more,
-  truncated}` con filas resumen (sin `body`/members/nodos crudos). Para el
-  detalle usar los `get_*` puntuales; `get_udt`/`get_aoi`/`get_routine_context`
-  aceptan `detail="full"` de forma explicita.
+  truncated}` con filas resumen (sin `body`/members/nodos crudos). Las tools
+  profundas devuelven `detail="summary"` por defecto; usa `detail="detail"`
+  para muestras acotadas y `detail="full"` solo cuando necesites el bundle
+  crudo. Las respuestas acotadas deben traer `result_size` y `truncated`; no
+  crear spill a `.tmp` salvo que la llamada pida `spill=true` explicitamente.
 - Los lookups fallidos devuelven `{found: false, did_you_mean: [...]}` en vez
   de `null`.
 - El indice SQLite tiene `PRAGMA user_version`; si el workspace fue generado
@@ -133,9 +135,11 @@ fuente del repo.
 - `exists(query, kinds=None, scope=None)` para negativos baratos y confiables.
 - `get_operand_context(operand, scope=None, detail="summary")` para tag/miembro,
   comentarios, datos y referencias compactas.
-- `cross_reference(symbol, mode="exact", access=None, destructive=None,
-  scope=None, limit=50, offset=0)` para una vista estilo Logix, con flag
-  destructivo (`write`/`read_write`) y paginacion.
+- `cross_reference(symbol=None, name=None, operand=None, mode="exact",
+  access=None, destructive=None, scope=None, limit=50, offset=0)` para una vista
+  estilo Logix, con flag destructivo (`write`/`read_write`) y paginacion.
+  Los alias son retrocompatibles; si llegan dos valores distintos, debe fallar
+  claro y no elegir en silencio.
 - `get_routine_slice(program=None, routine=None, routine_id=None, sheet=None,
   unit_id=None, query=None, before=1, after=1)` para leer solo una hoja, rung,
   unidad o vecindario.
@@ -155,20 +159,25 @@ fuente del repo.
   mensajes -> evidencia PLC y limites ("no trip logic found", HMI substitution).
 - `decode_summary(tag, limit=50)` para expandir una bobina/tag resumen en bits
   miembro, comentarios y alarmas relacionadas.
-- `aoi_instance_bindings(instance, limit=10)` para tabla AOI `param | usage |
-  wired | argument/sources/destinations`, incluyendo pines requeridos sin cablear.
-- `search_entities(pattern)` para encontrar entidades por texto.
+- `aoi_instance_bindings(instance=None, name=None, detail="summary", limit=10,
+  spill=false)` para tabla AOI `param | usage | wired |
+  argument/sources/destinations`, incluyendo pines requeridos sin cablear.
+- `search_entities(pattern=None, query=None)` para encontrar entidades por texto.
 - `get_entity(entity_id)` si ya tienes un ID.
-- `get_tag_context(name, scope=None)` para tag + comentarios + datos + refs.
+- `get_tag_context(name, scope=None, detail="summary", spill=false)` para tag +
+  comentarios + datos + refs.
 - `find_references(symbol)` para usos de un simbolo.
 - `tag_producers_consumers(name)` para escritores vs lectores.
 - `impact_of(name, max_depth=3, limit=300)` para impacto transitivo.
-- `io_trace(name)` para alias, E/S fisica, logica y alarmas.
+- `io_trace(name=None, symbol=None)` para alias, E/S fisica, logica y alarmas.
 - `get_routine_context(program=None, routine=None, routine_id=None)` para una
   rutina con unidades RLL/ST/FBD/SFC.
-- `get_aoi_context(name)` para parametros, local tags y rutinas AOI.
-- `get_module_context(module)` para puertos, conexiones, I/O tags y comentarios
-  de puntos.
+- `get_aoi_context(name, detail="summary", spill=false)` para parametros, local
+  tags y rutinas AOI.
+- `get_module_context(module=None, name=None, detail="summary", spill=false)`
+  para puertos, conexiones, I/O tags y comentarios de puntos. En summary,
+  `io_tags` debe aparecer en un solo lugar top-level, no duplicado dentro de
+  conexiones.
 - `call_graph(routine=None, program=None)` para llamadas o arbol task/program.
   Incluye llamadas JSR hechas desde rutinas FBD.
 - `run_diagnostics(rules=None, severity=None, limit=50)` para hallazgos
@@ -217,6 +226,12 @@ fuente del repo.
    `needs_runtime_or_field_state` o `may_depend_on_external_controller_or_gateway`,
    separa evidencia PLC probada de lo que requiere export HMI, valores online o
    informacion externa.
+3. La capa SDK es opcional y fail-closed: solo capacidades nombradas read-only
+   pueden existir. No exponer nunca como tool MCP normal `upload_to_new_project`,
+   `download`, `set_tag_value*`, `change_controller_mode`, imports,
+   safety/protect/lock ni SD card. La evidencia runtime debe ir en
+   `runtime_evidence/` con `observed_at`, `expires_at`, `fresh/stale`,
+   `source_fingerprint`, modo ONLINE/OFFLINE, identidad del controlador y permiso.
 
 ### Analizar un modulo o punto I/O
 

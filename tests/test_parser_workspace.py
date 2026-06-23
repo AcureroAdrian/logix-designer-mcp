@@ -1,7 +1,8 @@
+import hashlib
 from pathlib import Path
 
 from logix_mcp.parser import parse_l5x
-from logix_mcp.workspace import ingest_l5x, read_jsonl
+from logix_mcp.workspace import ingest_l5x, inspect_workspace, read_jsonl
 
 
 SIMPLE_L5X = """<?xml version="1.0" encoding="UTF-8"?>
@@ -97,6 +98,21 @@ def test_ingest_l5x_materializes_workspace(tmp_path: Path):
     assert (out / "index" / "logix.sqlite").exists()
     symbols = read_jsonl(out, "symbols.jsonl")
     assert any(row["name"] == "StartPB" for row in symbols)
+
+
+def test_inspect_workspace_exposes_short_source_fingerprint(tmp_path: Path):
+    source = tmp_path / "demo.L5X"
+    out = tmp_path / "demo.logix"
+    source.write_text(SIMPLE_L5X, encoding="utf-8")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+
+    result = ingest_l5x(source, out)
+    inspected = inspect_workspace(out)
+
+    assert result["project"]["source_fingerprint"] == expected
+    assert result["project"]["identity"]["fingerprint"] == expected
+    assert inspected["source_fingerprint"] == expected
+    assert inspected["identity"]["export_date"] == result["project"]["root"].get("ExportDate")
 
 
 def test_coverage_gate_passes_for_fully_handled_l5x(tmp_path: Path):

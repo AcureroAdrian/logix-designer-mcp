@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from logix_mcp.server import create_server, envelope, probe_envelope, summarize_row
-from logix_mcp.workspace import ingest_l5x
+from logix_mcp.intelligence import coverage_limits, get_routine_slice
+from logix_mcp.server import create_server, envelope, module_context_view, probe_envelope, resolve_alias, summarize_row
+from logix_mcp.workspace import ingest_l5x, read_jsonl
 
 from test_parser_workspace import SIMPLE_L5X
 
@@ -29,11 +30,15 @@ DEFAULT_CALLS = [
     ("list_aois", {}),
     ("list_modules", {}),
     ("list_entities", {}),
+    ("get_tag_context", {"name": "StartPB"}),
+    ("get_aoi_context", {"name": "MOTOR_AOI"}),
+    ("get_module_context", {"module": "Local"}),
+    ("aoi_instance_bindings", {"instance": "Motor_AOI_01"}),
     ("run_diagnostics", {}),
 ]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ARNOLD_WORKSPACE = PROJECT_ROOT / "Arnold_0058_020_060926.logix"
+ARNOLD_WORKSPACE = PROJECT_ROOT / "Arnold_0058_029_062226.logix"
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +60,77 @@ def _payload_size(payload: object) -> int:
 
 def _call(server, name: str, arguments: dict) -> object:
     return asyncio.run(server.call_tool(name, arguments))
+
+
+def _json_call(server, name: str, arguments: dict) -> dict:
+    result = _call(server, name, arguments)
+    if isinstance(result, tuple):
+        result = result[0]
+    assert result and hasattr(result[0], "text")
+    return json.loads(result[0].text)
+
+
+def _arnold_deep_calls(workspace: Path) -> list[tuple[str, dict]]:
+    calls: list[tuple[str, dict]] = []
+    tag_counts: dict[str, int] = {}
+    for row in read_jsonl(workspace, "xrefs.jsonl"):
+        symbol = row.get("base_symbol") or row.get("symbol")
+        if symbol:
+            tag_counts[str(symbol)] = tag_counts.get(str(symbol), 0) + 1
+    if tag_counts:
+        tag = max(tag_counts, key=tag_counts.get)
+        calls.append(("get_tag_context", {"name": tag}))
+
+    aois = read_jsonl(workspace, "aoi_definitions.jsonl")
+    if aois:
+        calls.append(("get_aoi_context", {"name": aois[0]["name"]}))
+
+    point_counts: dict[str, int] = {}
+    for row in read_jsonl(workspace, "module_io_points.jsonl"):
+        module = row.get("module")
+        if module:
+            point_counts[str(module)] = point_counts.get(str(module), 0) + 1
+    modules = read_jsonl(workspace, "modules.jsonl")
+    if point_counts:
+        calls.append(("get_module_context", {"module": max(point_counts, key=point_counts.get)}))
+    elif modules:
+        calls.append(("get_module_context", {"module": modules[0]["name"]}))
+
+    for row in read_jsonl(workspace, "fbd_nodes.jsonl"):
+        if row.get("node_type") == "AddOnInstruction" and row.get("operand"):
+            calls.append(("aoi_instance_bindings", {"instance": row["operand"]}))
+            break
+    return calls
+
+
+def _sfc_fixture() -> str:
+    sfc_routine = """
+          <Routine Name="Seq" Type="SFC">
+            <SFCContent>
+              <Step ID="0" X="100" Y="120" Operand="Step_000" InitialStep="true"/>
+              <Transition ID="1" X="100" Y="240" Operand="Tran_000">
+                <Condition>
+                  <STContent>
+                    <Line Number="0"><![CDATA[StartPB]]></Line>
+                  </STContent>
+                </Condition>
+              </Transition>
+              <DirectedLink FromID="0" ToID="1" Show="true"/>
+            </SFCContent>
+          </Routine>
+"""
+    return SIMPLE_L5X.replace('          <Routine Name="Calc" Type="ST">', sfc_routine + '          <Routine Name="Calc" Type="ST">', 1)
+
+
+def _force_sfc_coverage_gap(workspace: Path) -> None:
+    path = workspace / "ir" / "coverage.json"
+    coverage = json.loads(path.read_text(encoding="utf-8"))
+    surface = coverage["surfaces"]["sfc_nodes"]
+    surface["source_count"] = max(int(surface.get("source_count") or 0), 2)
+    surface["covered_count"] = 1
+    surface["missing_count"] = 1
+    coverage["missing"]["P0"] = sorted(set((coverage["missing"].get("P0") or []) + ["sfc_nodes"]))
+    path.write_text(json.dumps(coverage, indent=2) + "\n", encoding="utf-8")
 
 
 def test_default_tool_calls_stay_within_budget_on_fixture(fixture_workspace: Path):
@@ -90,11 +166,73 @@ def test_default_tool_calls_stay_within_budget_on_arnold():
         ("get_routine_context", {"program": "Drv_Cooling", "routine": "main"}),
         ("get_aoi", {"name": "BREAKER"}),
         ("get_fbd_sheet", {"program": "Drv_Cooling", "routine": "main", "sheet": "1"}),
+        *_arnold_deep_calls(ARNOLD_WORKSPACE),
     ]:
         size = _payload_size(_call(server, name, arguments))
         if size >= BUDGET_CHARS:
             oversized.append(f"{name}: {size} chars")
     assert not oversized, "Tools over budget: " + ", ".join(oversized)
+
+
+def test_deep_tool_defaults_report_size_and_do_not_spill(fixture_workspace: Path):
+    server = create_server(fixture_workspace)
+    for name, arguments in DEFAULT_CALLS:
+        if name not in {"get_tag_context", "get_aoi_context", "get_module_context", "aoi_instance_bindings"}:
+            continue
+        result = _json_call(server, name, arguments)
+        assert result["detail"] == "summary"
+        assert isinstance(result["result_size"], int)
+        assert result["result_size"] < BUDGET_CHARS
+        assert result["truncated"] in {False, True}
+        assert result.get("spilled") is None
+    assert not (fixture_workspace.parent / ".tmp" / "logix_mcp_spill").exists()
+
+
+def test_module_summary_keeps_io_tags_in_one_place():
+    result, truncated = module_context_view(
+        {
+            "module": {"kind": "module", "name": "Slot1", "io_tags": [{"role": "Input"}]},
+            "ports": [],
+            "connections": [{"name": "Input", "io_tags": [{"role": "Input"}]}],
+            "io_tags": [{"role": "Input", "direction": "input", "data_type": "BOOL"}],
+            "io_points": [],
+        },
+        "summary",
+    )
+
+    assert truncated is False
+    assert "io_tags" not in result["module"]
+    assert "io_tags" not in result["connections"][0]
+    assert result["io_tags"] == [{"role": "Input", "direction": "input", "data_type": "BOOL"}]
+
+
+def test_alias_conflicts_fail_clearly(fixture_workspace: Path):
+    assert resolve_alias("symbol", "Motor_A", name="Motor_A") == "Motor_A"
+    conflict = _json_call(
+        create_server(fixture_workspace),
+        "cross_reference",
+        {"symbol": "StartPB", "name": "MotorRun"},
+    )
+
+    assert conflict["error"] == "Conflicting aliases"
+    assert conflict["values"] == {"symbol": "StartPB", "name": "MotorRun"}
+
+
+def test_sfc_coverage_limits_are_targeted(tmp_path: Path, fixture_workspace: Path):
+    source = tmp_path / "sfc_demo.L5X"
+    source.write_text(_sfc_fixture(), encoding="utf-8")
+    workspace = tmp_path / "sfc_demo.logix"
+    ingest_l5x(source, workspace)
+    _force_sfc_coverage_gap(workspace)
+
+    assert any("sfc_nodes" in limit for limit in coverage_limits(workspace, "sfc"))
+    sfc_slice = get_routine_slice(workspace, program="MainProgram", routine="Seq")
+    rll_slice = get_routine_slice(fixture_workspace, program="MainProgram", routine="MainRoutine")
+    sfc_context = _json_call(create_server(workspace), "get_routine_context", {"program": "MainProgram", "routine": "Seq"})
+
+    assert any("sfc_nodes" in limit for limit in sfc_slice["limits"])
+    assert any("sfc_nodes" in limit for limit in sfc_context["limits"])
+    assert "limits" not in rll_slice
 
 
 def test_envelope_reports_totals_and_truncation():
