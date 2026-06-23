@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 from typing import Any
+import hashlib
+import re
 import xml.etree.ElementTree as ET
 
 from .extractors import (
@@ -69,25 +71,42 @@ HANDLED_ELEMENTS = {
 # documents the data loss so the gate reports it as a P1 coverage gap instead
 # of hiding it; move an element to HANDLED_ELEMENTS when its extractor lands.
 KNOWN_UNEXTRACTED_ELEMENTS = {
-    "MessageParameters": "preserved raw inside tag_data but not normalized or FTS-indexed",
-    "DataTypeFormats": "module profile CIP instance paths (ProSoft/EIP) lost",
-    "DataTypeFormat": "module profile CIP instance paths (ProSoft/EIP) lost",
-    "PL": "module profile PL subtree collapsed to text by _extended_properties",
-    "Version": "module profile PL/Version attributes lost",
-    "EngineeringUnits": "per-channel engineering units for analog modules lost",
-    "EngineeringUnit": "per-channel engineering units for analog modules lost",
-    "RedundancyInfo": "controller redundancy flag lost (operationally relevant)",
-    "Security": "controller security/change-detection metadata lost",
-    "SafetyInfo": "controller safety metadata lost",
-    "CST": "coordinated system time configuration lost",
-    "WallClockTime": "wall clock configuration lost",
-    "TimeSynchronize": "PTP time sync configuration lost",
-    "Trends": "trend definitions lost",
-    "DataLogs": "data log definitions lost",
-    "ChildPrograms": "parent/child program relationship lost",
-    "ChildProgram": "parent/child program relationship lost",
-    "RevisionNote": "AOI revision notes (author/date traceability) lost",
-    "HMICmd": "alarm HMI command configuration outside the alarms model",
+    "MessageParameters": "normalized into message_parameters with raw source anchor",
+    "DataTypeFormats": "module profile group normalized into module_profile_fragments with raw source anchor",
+    "DataTypeFormat": "module profile CIP instance paths normalized into module_profile_fragments",
+    "PL": "module profile PL normalized into module_profile_fragments",
+    "Version": "module profile version normalized into module_profile_fragments",
+    "EngineeringUnits": "engineering unit group preserved and summarized",
+    "EngineeringUnit": "per-channel engineering units normalized into engineering_units",
+    "RedundancyInfo": "controller metadata normalized with raw source anchor",
+    "Security": "controller metadata normalized with raw source anchor",
+    "SafetyInfo": "controller metadata normalized with raw source anchor",
+    "CST": "controller time metadata normalized with raw source anchor",
+    "WallClockTime": "controller time metadata normalized with raw source anchor",
+    "TimeSynchronize": "controller time metadata normalized with raw source anchor",
+    "Trends": "preserved as raw source fragment",
+    "DataLogs": "preserved as raw source fragment",
+    "ChildPrograms": "preserved as raw source fragment and child rows normalized",
+    "ChildProgram": "normalized into program_children with raw source anchor",
+    "RevisionNote": "preserved as raw source fragment",
+    "HMICmd": "preserved as raw source fragment",
+}
+
+SEMANTIC_SOURCE_ELEMENTS = {
+    "MessageParameters",
+    "DataTypeFormats",
+    "DataTypeFormat",
+    "PL",
+    "Version",
+    "EngineeringUnits",
+    "EngineeringUnit",
+    "RedundancyInfo",
+    "Security",
+    "SafetyInfo",
+    "CST",
+    "WallClockTime",
+    "TimeSynchronize",
+    "ChildProgram",
 }
 
 
@@ -121,6 +140,12 @@ def parse_l5x(path: str | Path) -> dict:
     comments = _comment_records(root)
     tag_comments = extract_tag_comment_records(root)
     produce_consume = extract_produce_consume_info(root)
+    source_fragments = _source_fragments(root)
+    controller_metadata = _controller_metadata(root)
+    engineering_units = _engineering_units(root)
+    message_parameters = _message_parameters(root)
+    module_profile_fragments = _module_profile_fragments(root)
+    program_children = _program_children(root)
     coverage_counts = _source_quality_counts(root)
 
     project = {
@@ -143,8 +168,11 @@ def parse_l5x(path: str | Path) -> dict:
         "routine_units": collector["routine_units"],
         "fbd_nodes": collector["fbd_nodes"],
         "fbd_wires": collector["fbd_wires"],
+        "sfc_charts": collector["sfc_charts"],
         "sfc_nodes": collector["sfc_nodes"],
         "sfc_links": collector["sfc_links"],
+        "sfc_branches": collector["sfc_branches"],
+        "sfc_legs": collector["sfc_legs"],
         "xrefs": collector["xrefs"],
         "comments": comments,
         "tag_comments": tag_comments,
@@ -152,6 +180,12 @@ def parse_l5x(path: str | Path) -> dict:
         "alarms": _alarm_rows(alarm_messages),
         "messages": alarm_messages,
         "produce_consume": produce_consume,
+        "source_fragments": source_fragments,
+        "controller_metadata": controller_metadata,
+        "engineering_units": engineering_units,
+        "message_parameters": message_parameters,
+        "module_profile_fragments": module_profile_fragments,
+        "program_children": program_children,
         "warnings": [],
     }
     project["aoi_definitions"] = [_aoi_definition(aoi) for aoi in project["aois"]]
@@ -171,8 +205,11 @@ def _collector() -> dict[str, list[JsonDict]]:
         "routine_units": [],
         "fbd_nodes": [],
         "fbd_wires": [],
+        "sfc_charts": [],
         "sfc_nodes": [],
         "sfc_links": [],
+        "sfc_branches": [],
+        "sfc_legs": [],
         "xrefs": [],
     }
 
@@ -333,7 +370,7 @@ def _program(elem: ET.Element, collector: dict[str, list[JsonDict]], aoi_signatu
 
 def _routine(elem: ET.Element, program: str | None, owner: str, collector: dict[str, list[JsonDict]], aoi_signatures: dict[str, list[str]] | None = None) -> dict:
     parsed = extract_routine_ir(elem, owner=owner, program=program, aoi_signatures=aoi_signatures)
-    for key in ["routine_units", "fbd_nodes", "fbd_wires", "sfc_nodes", "sfc_links", "xrefs"]:
+    for key in ["routine_units", "fbd_nodes", "fbd_wires", "sfc_charts", "sfc_nodes", "sfc_links", "sfc_branches", "sfc_legs", "xrefs"]:
         collector[key].extend(parsed.get(key, []))
     collector["routines"].append(parsed["routine"])
     return parsed["routine"]
@@ -378,6 +415,229 @@ def _module_io_tags(modules: list[JsonDict]) -> list[JsonDict]:
             row["kind"] = "module_io_tag"
             row["id"] = f"{module.get('id')}.IOTag:{row.get('role') or row.get('tag') or index}:{index}"
             rows.append(_compact(row))
+    return rows
+
+
+def _source_fragments(root: ET.Element) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for elem, path, ancestors in _walk_with_paths(root):
+        elem_name = local_name(elem.tag)
+        if elem_name not in KNOWN_UNEXTRACTED_ELEMENTS:
+            continue
+        raw_xml = ET.tostring(elem, encoding="unicode", short_empty_elements=True)
+        source_hash = _source_hash(raw_xml)
+        owner = _nearest_owner(ancestors)
+        if owner is None:
+            owner = ancestors[-1] if ancestors else elem
+        coverage_mode = "semantic_dataset" if elem_name in SEMANTIC_SOURCE_ELEMENTS else "raw_preserved"
+        rows.append(
+            _compact(
+                {
+                    "kind": "source_fragment",
+                    "id": _source_anchor(path, source_hash),
+                    "anchor": _source_anchor(path, source_hash),
+                    "element": elem_name,
+                    "owner_kind": local_name(owner.tag) if owner is not None else None,
+                    "owner_id": _owner_identifier(owner) if owner is not None else None,
+                    "owner": _owner_ref(owner) if owner is not None else None,
+                    "xml_path": path,
+                    "source_hash": source_hash,
+                    "attributes": xml_attributes(elem),
+                    "summary": _fragment_summary(elem),
+                    "raw_xml": raw_xml,
+                    "byte_size": len(raw_xml.encode("utf-8")),
+                    "coverage_mode": coverage_mode,
+                }
+            )
+        )
+    return rows
+
+
+def _controller_metadata(root: ET.Element) -> list[JsonDict]:
+    names = {"RedundancyInfo", "Security", "SafetyInfo", "CST", "WallClockTime", "TimeSynchronize"}
+    rows: list[JsonDict] = []
+    for elem, path, _ancestors in _walk_with_paths(root):
+        elem_name = local_name(elem.tag)
+        if elem_name not in names:
+            continue
+        source_hash = _element_source_hash(elem)
+        rows.append(
+            _compact(
+                {
+                    "kind": "controller_metadata",
+                    "id": f"ControllerMetadata:{elem_name}:{len(rows):04d}",
+                    "name": elem_name,
+                    "element": elem_name,
+                    "text": xml_text(elem),
+                    "attributes": xml_attributes(elem),
+                    "xml_path": path,
+                    "source_hash": source_hash,
+                    "raw_anchor": _source_anchor(path, source_hash),
+                }
+            )
+        )
+    return rows
+
+
+def _engineering_units(root: ET.Element) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for elem, path, ancestors in _walk_with_paths(root):
+        if local_name(elem.tag) != "EngineeringUnit":
+            continue
+        module = _nearest_ancestor(ancestors, {"Module"})
+        io_tag = _nearest_ancestor(ancestors, {"ConfigTag", "InputTag", "OutputTag", "InAliasTag", "OutAliasTag"})
+        module_name = _module_name(module) if module is not None else None
+        tag_name = local_name(io_tag.tag) if io_tag is not None else None
+        role, direction = _io_tag_role(tag_name)
+        operand = elem.attrib.get("Operand")
+        source_hash = _element_source_hash(elem)
+        rows.append(
+            _compact(
+                {
+                    "kind": "engineering_unit",
+                    "id": f"EngineeringUnit:{module_name or 'unknown'}:{tag_name or 'tag'}:{operand or len(rows)}",
+                    "module": module_name,
+                    "module_id": f"Module:{module_name}" if module_name else None,
+                    "module_catalog_number": module.attrib.get("CatalogNumber") if module is not None else None,
+                    "tag": tag_name,
+                    "role": role,
+                    "direction": direction,
+                    "operand": operand,
+                    "point": _point_from_operand(operand),
+                    "engineering_unit": xml_text(elem),
+                    "attributes": xml_attributes(elem),
+                    "xml_path": path,
+                    "source_hash": source_hash,
+                    "raw_anchor": _source_anchor(path, source_hash),
+                }
+            )
+        )
+    return rows
+
+
+def _message_parameters(root: ET.Element) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for elem, path, ancestors in _walk_with_paths(root):
+        if local_name(elem.tag) != "MessageParameters":
+            continue
+        tag = _nearest_ancestor(ancestors, {"Tag", "LocalTag"})
+        attrs = xml_attributes(elem)
+        tag_name = tag.attrib.get("Name") if tag is not None else None
+        source_hash = _element_source_hash(elem)
+        rows.append(
+            _compact(
+                {
+                    "kind": "message_parameters",
+                    "id": f"MessageParameters:{tag_name or len(rows)}:{len(rows):04d}",
+                    "tag_name": tag_name,
+                    "tag_type": tag.attrib.get("TagType") if tag is not None else None,
+                    "data_type": tag.attrib.get("DataType") if tag is not None else None,
+                    "message_type": attrs.get("MessageType"),
+                    "service_code": attrs.get("ServiceCode"),
+                    "object_type": attrs.get("ObjectType"),
+                    "class": attrs.get("Class") or attrs.get("ClassName"),
+                    "instance": attrs.get("Instance"),
+                    "attribute": attrs.get("Attribute"),
+                    "connection_path": attrs.get("ConnectionPath"),
+                    "local_element": attrs.get("LocalElement"),
+                    "destination_tag": attrs.get("DestinationTag"),
+                    "requested_length": attrs.get("RequestedLength"),
+                    "attributes": attrs,
+                    "xml_path": path,
+                    "source_hash": source_hash,
+                    "raw_anchor": _source_anchor(path, source_hash),
+                }
+            )
+        )
+    return rows
+
+
+def _module_profile_fragments(root: ET.Element) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    public_by_module: dict[int, JsonDict] = {}
+    for elem, _path, ancestors in _walk_with_paths(root):
+        if local_name(elem.tag) != "public":
+            continue
+        module = _nearest_ancestor(ancestors, {"Module"})
+        if module is None:
+            continue
+        public_by_module[id(module)] = {
+            "vendor": xml_text(xml_child(elem, "Vendor")),
+            "cat_num": xml_text(xml_child(elem, "CatNum")),
+        }
+
+    for elem, path, ancestors in _walk_with_paths(root):
+        elem_name = local_name(elem.tag)
+        if elem_name not in {"PL", "DataTypeFormat"}:
+            continue
+        module = _nearest_ancestor(ancestors, {"Module"})
+        if module is None:
+            continue
+        module_name = _module_name(module)
+        public_info = public_by_module.get(id(module), {})
+        source_hash = _element_source_hash(elem)
+        base = {
+            "kind": "module_profile_fragment",
+            "id": f"ModuleProfile:{module_name}:{elem_name}:{len(rows):04d}",
+            "module": module_name,
+            "module_id": f"Module:{module_name}" if module_name else None,
+            "catalog_number": module.attrib.get("CatalogNumber"),
+            "vendor": module.attrib.get("Vendor") or public_info.get("vendor"),
+            "cat_num": public_info.get("cat_num"),
+            "element": elem_name,
+            "attributes": xml_attributes(elem),
+            "xml_path": path,
+            "source_hash": source_hash,
+            "raw_anchor": _source_anchor(path, source_hash),
+        }
+        if elem_name == "PL":
+            version = xml_child(elem, "Version")
+            connection = xml_child(elem, "Connection")
+            base.update(
+                {
+                    "profile_level": _direct_text(elem),
+                    "version_name": version.attrib.get("Name") if version is not None else None,
+                    "connection_name": connection.attrib.get("Name") if connection is not None else None,
+                    "connection_format": connection.attrib.get("Format") if connection is not None else None,
+                }
+            )
+        elif elem_name == "DataTypeFormat":
+            base.update(
+                {
+                    "datatype_format_type": elem.attrib.get("Type"),
+                    "instance_application_path": elem.attrib.get("InstanceApplicationPath"),
+                    "format": elem.attrib.get("Format"),
+                }
+            )
+        rows.append(_compact(base))
+    return rows
+
+
+def _program_children(root: ET.Element) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for elem, path, ancestors in _walk_with_paths(root):
+        if local_name(elem.tag) != "ChildProgram":
+            continue
+        program = _nearest_ancestor(ancestors, {"Program"})
+        parent_name = program.attrib.get("Name") if program is not None else None
+        child_name = elem.attrib.get("Name") or xml_text(elem)
+        source_hash = _element_source_hash(elem)
+        rows.append(
+            _compact(
+                {
+                    "kind": "program_child",
+                    "id": f"ProgramChild:{parent_name or 'unknown'}:{child_name or len(rows)}",
+                    "parent_program": parent_name,
+                    "parent_program_id": f"Program:{parent_name}" if parent_name else None,
+                    "child_program": child_name,
+                    "child_program_id": f"Program:{child_name}" if child_name else None,
+                    "attributes": xml_attributes(elem),
+                    "xml_path": path,
+                    "source_hash": source_hash,
+                    "raw_anchor": _source_anchor(path, source_hash),
+                }
+            )
+        )
     return rows
 
 
@@ -465,14 +725,23 @@ def _entities(project: JsonDict) -> list[JsonDict]:
         "routine_units",
         "fbd_nodes",
         "fbd_wires",
+        "sfc_charts",
         "sfc_nodes",
         "sfc_links",
+        "sfc_branches",
+        "sfc_legs",
         "module_ports",
         "module_connections",
         "module_io_tags",
         "module_io_points",
         "alarms",
         "messages",
+        "controller_metadata",
+        "engineering_units",
+        "message_parameters",
+        "module_profile_fragments",
+        "program_children",
+        "source_fragments",
     ]:
         for row in project.get(collection, []):
             rows.append(_entity(row, fallback_kind=collection.removesuffix("s")))
@@ -549,6 +818,17 @@ def _edges(project: JsonDict) -> list[JsonDict]:
                 }
             )
         )
+    for child in project.get("program_children", []):
+        rows.append(
+            _compact(
+                {
+                    "kind": "program_child",
+                    "from": child.get("parent_program_id"),
+                    "to": child.get("child_program_id"),
+                    "source": child.get("id"),
+                }
+            )
+        )
     return [_compact(row) for row in rows]
 
 
@@ -584,7 +864,7 @@ def _coverage(root: ET.Element, project: JsonDict, counts: dict[str, int]) -> Js
         "fbd_wires": _surface("P1", counts["fbd_wires"], len(project["fbd_wires"])),
         "sfc_links": _surface("P1", sfc_source_nodes["DirectedLink"], len(project["sfc_links"])),
         "alarm_messages": _surface("P1", element_counts["Message"], len(project["messages"])),
-        "unextracted_elements": _unextracted_elements_surface(element_counts),
+        "unextracted_elements": _unextracted_elements_surface(element_counts, project.get("source_fragments", [])),
         "unknown_elements": _unknown_elements_surface(element_counts),
     }
     missing = {"P0": [], "P1": []}
@@ -641,21 +921,59 @@ def _unknown_elements_surface(element_counts: Counter) -> JsonDict:
     }
 
 
-def _unextracted_elements_surface(element_counts: Counter) -> JsonDict:
+def _unextracted_elements_surface(element_counts: Counter, source_fragments: list[JsonDict]) -> JsonDict:
     found = {
         name: count
         for name, count in sorted(element_counts.items())
         if name in KNOWN_UNEXTRACTED_ELEMENTS
     }
     total = sum(found.values())
+    fragment_modes: dict[str, Counter[str]] = {}
+    for fragment in source_fragments:
+        element = fragment.get("element")
+        if not element:
+            continue
+        fragment_modes.setdefault(str(element), Counter())[str(fragment.get("coverage_mode") or "raw_preserved")] += 1
+    elements = []
+    total_semantic = 0
+    total_raw = 0
+    total_missing = 0
+    for name, count in found.items():
+        modes = fragment_modes.get(name, Counter())
+        semantic_count = min(count, modes.get("semantic_dataset", 0))
+        raw_count = min(max(0, count - semantic_count), modes.get("raw_preserved", 0))
+        covered = min(count, semantic_count + raw_count)
+        missing = max(0, count - covered)
+        total_semantic += semantic_count
+        total_raw += raw_count
+        total_missing += missing
+        elements.append(
+            _compact(
+                {
+                    "element": name,
+                    "source_count": count,
+                    "semantic_covered_count": semantic_count,
+                    "raw_preserved_count": raw_count,
+                    "covered_count": covered,
+                    "missing_count": missing,
+                    "coverage_modes": dict(modes),
+                    "note": KNOWN_UNEXTRACTED_ELEMENTS[name],
+                }
+            )
+        )
     return {
         "priority": "P1",
         "source_count": total,
-        "covered_count": 0,
-        "missing_count": total,
+        "covered_count": min(total, total_semantic + total_raw),
+        "semantic_covered_count": total_semantic,
+        "raw_preserved_count": total_raw,
+        "missing_count": total_missing,
+        "coverage_mode_counts": {"semantic_dataset": total_semantic, "raw_preserved": total_raw, "not_covered": total_missing},
+        "elements": elements,
         "missing": [
-            {"element": name, "count": count, "note": KNOWN_UNEXTRACTED_ELEMENTS[name]}
-            for name, count in found.items()
+            {"element": item["element"], "count": item["missing_count"], "note": item.get("note")}
+            for item in elements
+            if item.get("missing_count")
         ],
     }
 
@@ -682,8 +1000,11 @@ def _counts(project: JsonDict, coverage_counts: dict[str, int]) -> JsonDict:
         "routine_units": len(project["routine_units"]),
         "fbd_nodes": len(project["fbd_nodes"]),
         "fbd_wires": len(project["fbd_wires"]),
+        "sfc_charts": len(project["sfc_charts"]),
         "sfc_nodes": len(project["sfc_nodes"]),
         "sfc_links": len(project["sfc_links"]),
+        "sfc_branches": len(project["sfc_branches"]),
+        "sfc_legs": len(project["sfc_legs"]),
         "modules": len(project["modules"]),
         "module_io_tags": len(project["module_io_tags"]),
         "module_io_points": len(project["module_io_points"]),
@@ -694,6 +1015,12 @@ def _counts(project: JsonDict, coverage_counts: dict[str, int]) -> JsonDict:
         "tag_data": len(project["tag_data"]),
         "alarms": len(project["alarms"]),
         "messages": len(project["messages"]),
+        "source_fragments": len(project["source_fragments"]),
+        "controller_metadata": len(project["controller_metadata"]),
+        "engineering_units": len(project["engineering_units"]),
+        "message_parameters": len(project["message_parameters"]),
+        "module_profile_fragments": len(project["module_profile_fragments"]),
+        "program_children": len(project["program_children"]),
         "edges": len(project["edges"]),
         "entities": len(project["entities"]),
     }
@@ -825,6 +1152,101 @@ def _qualified_operand(owner_name: str | None, operand: str | None) -> str | Non
     if operand.startswith((".", "[")):
         return f"{owner_name}{operand}"
     return f"{owner_name}.{operand}"
+
+
+def _owner_identifier(elem: ET.Element) -> str:
+    attrs = xml_attributes(elem)
+    name = attrs.get("Name") or attrs.get("Operand") or attrs.get("Number") or attrs.get("ID")
+    elem_name = local_name(elem.tag)
+    return f"{elem_name}:{name}" if name else elem_name
+
+
+def _nearest_ancestor(ancestors: tuple[ET.Element, ...], names: set[str]) -> ET.Element | None:
+    for elem in reversed(ancestors):
+        if local_name(elem.tag) in names:
+            return elem
+    return None
+
+
+def _source_hash(raw_xml: str) -> str:
+    return hashlib.sha256(raw_xml.encode("utf-8")).hexdigest()
+
+
+def _element_source_hash(elem: ET.Element) -> str:
+    return _source_hash(ET.tostring(elem, encoding="unicode", short_empty_elements=True))
+
+
+def _source_anchor(path: str, source_hash: str) -> str:
+    digest = hashlib.sha256(f"{path}\0{source_hash}".encode("utf-8")).hexdigest()[:16]
+    return f"xml:{digest}"
+
+
+def _fragment_summary(elem: ET.Element) -> str:
+    attrs = xml_attributes(elem)
+    pieces = [local_name(elem.tag)]
+    if attrs:
+        rendered = ", ".join(f"{key}={value}" for key, value in sorted(attrs.items())[:8])
+        pieces.append(rendered)
+    text = " ".join(xml_text(elem).split())
+    if text:
+        pieces.append(text[:240])
+    return " | ".join(pieces)
+
+
+def _module_name(module: ET.Element | None) -> str | None:
+    if module is None:
+        return None
+    raw_name = module.attrib.get("Name")
+    if raw_name:
+        return raw_name
+    parent = module.attrib.get("ParentModule")
+    slot = _first_slot(module)
+    parent_port = module.attrib.get("ParentModPortId")
+    if parent and slot:
+        return f"{parent}:{slot}"
+    if parent and parent_port:
+        return f"{parent}:port{parent_port}"
+    return None
+
+
+def _first_slot(module: ET.Element) -> str | None:
+    ports = xml_child(module, "Ports")
+    for port in xml_children(ports, "Port"):
+        address = port.attrib.get("Address")
+        if address and address.isdigit():
+            return address
+    return None
+
+
+def _io_tag_role(tag_name: str | None) -> tuple[str | None, str | None]:
+    mapping = {
+        "ConfigTag": ("Config", "config"),
+        "InputTag": ("Input", "input"),
+        "OutputTag": ("Output", "output"),
+        "InAliasTag": ("InAlias", "input"),
+        "OutAliasTag": ("OutAlias", "output"),
+    }
+    return mapping.get(str(tag_name or ""), (None, None))
+
+
+def _point_from_operand(operand: str | None) -> int | None:
+    if not operand:
+        return None
+    text = operand.strip()
+    match = re.fullmatch(r"\.?\[?(\d+)\]?", text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(?:^|[^0-9])(\d+)$", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _direct_text(elem: ET.Element | None) -> str | None:
+    if elem is None or elem.text is None:
+        return None
+    text = elem.text.strip()
+    return text or None
 
 
 def _compact(value: Any) -> Any:

@@ -48,8 +48,23 @@ def test_index_built_with_base_symbol_column_and_indexes(tmp_path: Path):
     assert db.has_index(workspace)
 
     with db.connect(workspace) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         columns = {row[1] for row in conn.execute("PRAGMA table_info(xrefs)")}
         assert "base_symbol" in columns
+        table_names = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {
+            "sfc_charts",
+            "sfc_branches",
+            "sfc_legs",
+            "source_fragments",
+            "engineering_units",
+            "message_parameters",
+            "module_profile_fragments",
+            "program_children",
+        }.issubset(table_names)
         index_names = {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")

@@ -176,6 +176,7 @@ def get_routine_slice(
     routine_id: str | None = None,
     sheet: str | int | None = None,
     unit_id: str | None = None,
+    chart_id: str | None = None,
     query: str | None = None,
     before: int = 1,
     after: int = 1,
@@ -187,8 +188,8 @@ def get_routine_slice(
         return {"found": False, "routine": routine, "program": program, "routine_id": routine_id, "items": []}
 
     units = list(context.get("units") or [])
-    selected_indexes = _selected_unit_indexes(context, units, sheet, unit_id, query, before, after)
-    if not selected_indexes and not (sheet or unit_id or query):
+    selected_indexes = _selected_unit_indexes(context, units, sheet, unit_id, chart_id, query, before, after)
+    if not selected_indexes and not (sheet or unit_id or chart_id or query):
         selected_indexes = list(range(min(len(units), 20)))
 
     fbd_by_sheet = _fbd_by_sheet(context)
@@ -199,6 +200,7 @@ def get_routine_slice(
         "selection": {
             "sheet": str(sheet) if sheet is not None else None,
             "unit_id": unit_id,
+            "chart_id": chart_id,
             "query": query,
             "before": before,
             "after": after,
@@ -1118,8 +1120,11 @@ def _routine_context(workspace: str | Path, program: str | None, routine: str | 
         "xrefs": [row for row in _read_jsonl(workspace, "xrefs") if row.get("routine") == rid],
         "fbd_nodes": [row for row in _read_jsonl(workspace, "fbd_nodes") if row.get("routine_id") == rid],
         "fbd_wires": [row for row in _read_jsonl(workspace, "fbd_wires") if row.get("routine_id") == rid],
+        "sfc_charts": [row for row in _read_jsonl(workspace, "sfc_charts") if row.get("routine_id") == rid],
         "sfc_nodes": [row for row in _read_jsonl(workspace, "sfc_nodes") if row.get("routine_id") == rid],
         "sfc_links": [row for row in _read_jsonl(workspace, "sfc_links") if row.get("routine_id") == rid],
+        "sfc_branches": [row for row in _read_jsonl(workspace, "sfc_branches") if row.get("routine_id") == rid],
+        "sfc_legs": [row for row in _read_jsonl(workspace, "sfc_legs") if row.get("routine_id") == rid],
     }
 
 
@@ -1128,12 +1133,19 @@ def _selected_unit_indexes(
     units: list[JsonDict],
     sheet: str | int | None,
     unit_id: str | None,
+    chart_id: str | None,
     query: str | None,
     before: int,
     after: int,
 ) -> list[int]:
     if unit_id:
         return [i for i, unit in enumerate(units) if unit.get("id") == unit_id]
+    if chart_id:
+        return [
+            i
+            for i, unit in enumerate(units)
+            if unit.get("id") == chart_id or unit.get("chart_id") == chart_id or unit.get("unit_id") == chart_id
+        ]
     if sheet is not None:
         sheet_text = str(sheet)
         return [i for i, unit in enumerate(units) if str(unit.get("number")) == sheet_text or str(unit.get("sheet_number")) == sheet_text]
@@ -1809,6 +1821,12 @@ def _compact_unit(unit: JsonDict, fbd_by_sheet: dict[object, JsonDict]) -> JsonD
         "language": unit.get("language"),
         "number": unit.get("number"),
         "sequence": unit.get("sequence"),
+        "chart_id": unit.get("chart_id"),
+        "online_edit_type": unit.get("online_edit_type"),
+        "node_count": unit.get("node_count"),
+        "link_count": unit.get("link_count"),
+        "branch_count": unit.get("branch_count"),
+        "leg_count": unit.get("leg_count"),
         "comment": _clip(unit.get("comment")),
         "text": _clip(unit.get("text")),
         "instructions": [_compact_instruction(item) for item in unit.get("instructions", [])[:20]],

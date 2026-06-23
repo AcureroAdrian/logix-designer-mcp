@@ -119,6 +119,33 @@ def build_parser() -> argparse.ArgumentParser:
     bindings.add_argument("instance")
     bindings.add_argument("--limit", type=int, default=10)
 
+    sdk_status_cmd = sub.add_parser("sdk-status", help="Show optional SDK allowlist/fail-closed status.")
+
+    simulate = sub.add_parser("simulate-runtime", help="Generate simulated SDK-style runtime tag samples.")
+    simulate.add_argument("workspace", type=Path)
+    simulate.add_argument("--tag", action="append", required=True, help="Tag path to sample; repeat for multiple tags.")
+    simulate.add_argument("--samples", type=int, default=10)
+    simulate.add_argument("--interval-seconds", type=float, default=1.0)
+    simulate.add_argument("--data-type", default="REAL")
+    simulate.add_argument("--signal", choices=["sine", "sawtooth", "triangle", "square"], default="sine")
+    simulate.add_argument("--amplitude", type=float, default=100.0)
+    simulate.add_argument("--offset", type=float, default=0.0)
+    simulate.add_argument("--period-samples", type=int, default=20)
+    simulate.add_argument("--scope", default=None)
+    simulate.add_argument("--ttl-seconds", type=int, default=300)
+    simulate.add_argument("--preview-only", action="store_true", help="Return samples without writing runtime_evidence files.")
+
+    runtime_summary = sub.add_parser("runtime-summary", help="Summarize volatile runtime evidence for a workspace.")
+    runtime_summary.add_argument("workspace", type=Path)
+
+    runtime_evidence = sub.add_parser("runtime-evidence", help="List compact runtime evidence rows.")
+    runtime_evidence.add_argument("workspace", type=Path)
+    runtime_evidence.add_argument("--tag", default=None)
+    runtime_evidence.add_argument("--scope", default=None)
+    runtime_evidence.add_argument("--freshness", choices=["fresh", "stale"], default=None)
+    runtime_evidence.add_argument("--limit", type=int, default=50)
+    runtime_evidence.add_argument("--offset", type=int, default=0)
+
     return parser
 
 
@@ -209,6 +236,50 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "aoi-bindings":
         _print(aoi_instance_bindings(args.workspace, args.instance, limit=args.limit))
+        return 0
+    if args.command == "sdk-status":
+        from . import sdk_adapter
+
+        _print({"status": sdk_adapter.sdk_status(), "registry": sdk_adapter.validate_sdk_registry()})
+        return 0
+    if args.command == "simulate-runtime":
+        from . import sdk_adapter
+
+        _print(
+            sdk_adapter.simulate_runtime_tag_stream(
+                args.workspace,
+                args.tag,
+                samples=args.samples,
+                interval_seconds=args.interval_seconds,
+                data_type=args.data_type,
+                signal=args.signal,
+                amplitude=args.amplitude,
+                offset=args.offset,
+                period_samples=args.period_samples,
+                scope=args.scope,
+                ttl_seconds=args.ttl_seconds,
+                persist=not args.preview_only,
+            )
+        )
+        return 0
+    if args.command == "runtime-summary":
+        from . import sdk_adapter
+
+        _print(sdk_adapter.runtime_evidence_summary(args.workspace))
+        return 0
+    if args.command == "runtime-evidence":
+        from . import sdk_adapter
+
+        _print(
+            sdk_adapter.query_runtime_evidence(
+                args.workspace,
+                tag=args.tag,
+                scope=args.scope,
+                freshness=args.freshness,
+                limit=args.limit,
+                offset=args.offset,
+            )
+        )
         return 0
     parser.error("unknown command")
     return 2

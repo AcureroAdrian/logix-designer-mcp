@@ -81,18 +81,39 @@ def extract_sfc_units(elem: ET.Element, *, routine_id: str, owner: str | None = 
 
     resolved_owner = owner or _owner_from_id(routine_id)
     units = []
-    content = xml_child(elem, "SFCContent")
-    unit_id = f"{routine_id}.SFC"
-    for index, child in enumerate(list(content) if content is not None else []):
-        child_name = local_name(child.tag)
-        if child_name == "Step":
-            units.append(_compat_sfc_step(child, routine_id, unit_id, resolved_owner, program, index))
-        elif child_name == "Transition":
-            units.append(_compat_sfc_transition(child, routine_id, unit_id, resolved_owner, program, index))
-        elif child_name == "Branch":
-            units.append(_compat_sfc_branch(child, routine_id, unit_id, resolved_owner, program, index))
-        elif child_name == "DirectedLink":
-            units.append(_compat_sfc_link(child, routine_id, unit_id, resolved_owner, program, index))
+    for content_index, content in enumerate(xml_children(elem, "SFCContent")):
+        unit_id = _sfc_chart_id(routine_id, content_index)
+        online_edit_type = content.attrib.get("OnlineEditType")
+        for index, child in enumerate(list(content)):
+            child_name = local_name(child.tag)
+            if child_name == "Step":
+                row = _compat_sfc_step(child, routine_id, unit_id, resolved_owner, program, index)
+                row["chart_id"] = unit_id
+                row["content_index"] = content_index
+                if online_edit_type:
+                    row["online_edit_type"] = online_edit_type
+                units.append(row)
+            elif child_name == "Transition":
+                row = _compat_sfc_transition(child, routine_id, unit_id, resolved_owner, program, index)
+                row["chart_id"] = unit_id
+                row["content_index"] = content_index
+                if online_edit_type:
+                    row["online_edit_type"] = online_edit_type
+                units.append(row)
+            elif child_name == "Branch":
+                row = _compat_sfc_branch(child, routine_id, unit_id, resolved_owner, program, index)
+                row["chart_id"] = unit_id
+                row["content_index"] = content_index
+                if online_edit_type:
+                    row["online_edit_type"] = online_edit_type
+                units.append(row)
+            elif child_name == "DirectedLink":
+                row = _compat_sfc_link(child, routine_id, unit_id, resolved_owner, program, index)
+                row["chart_id"] = unit_id
+                row["content_index"] = content_index
+                if online_edit_type:
+                    row["online_edit_type"] = online_edit_type
+                units.append(row)
     return units
 
 
@@ -105,8 +126,11 @@ def extract_routine_ir(elem: ET.Element, *, owner: str, program: str | None = No
     units: list[JsonDict] = []
     fbd_nodes: list[JsonDict] = []
     fbd_wires: list[JsonDict] = []
+    sfc_charts: list[JsonDict] = []
     sfc_nodes: list[JsonDict] = []
     sfc_links: list[JsonDict] = []
+    sfc_branches: list[JsonDict] = []
+    sfc_legs: list[JsonDict] = []
     xrefs: list[JsonDict] = []
     body_lines: list[str] = []
     rungs: list[JsonDict] = []
@@ -127,8 +151,11 @@ def extract_routine_ir(elem: ET.Element, *, owner: str, program: str | None = No
     units.extend(extracted.get("routine_units", []))
     fbd_nodes.extend(extracted.get("fbd_nodes", []))
     fbd_wires.extend(extracted.get("fbd_wires", []))
+    sfc_charts.extend(extracted.get("sfc_charts", []))
     sfc_nodes.extend(extracted.get("sfc_nodes", []))
     sfc_links.extend(extracted.get("sfc_links", []))
+    sfc_branches.extend(extracted.get("sfc_branches", []))
+    sfc_legs.extend(extracted.get("sfc_legs", []))
     xrefs.extend(extracted.get("xrefs", []))
     body_lines.extend(extracted.get("body_lines", []))
     rungs.extend(extracted.get("rungs", []))
@@ -151,6 +178,7 @@ def extract_routine_ir(elem: ET.Element, *, owner: str, program: str | None = No
             "unit_count": len(units),
             "fbd_node_count": len(fbd_nodes),
             "fbd_wire_count": len(fbd_wires),
+            "sfc_chart_count": len(sfc_charts),
             "sfc_node_count": len(sfc_nodes),
             "sfc_link_count": len(sfc_links),
             "attributes": xml_attributes(elem),
@@ -161,8 +189,11 @@ def extract_routine_ir(elem: ET.Element, *, owner: str, program: str | None = No
         "routine_units": units,
         "fbd_nodes": fbd_nodes,
         "fbd_wires": fbd_wires,
+        "sfc_charts": sfc_charts,
         "sfc_nodes": sfc_nodes,
         "sfc_links": sfc_links,
+        "sfc_branches": sfc_branches,
+        "sfc_legs": sfc_legs,
         "xrefs": _annotate_xrefs(xrefs, routine),
     }
 
@@ -321,32 +352,94 @@ def _extract_fbd(elem: ET.Element, routine_id: str, owner: str, program: str | N
 
 def _extract_sfc(elem: ET.Element, routine_id: str, owner: str, program: str | None) -> JsonDict:
     units: list[JsonDict] = []
+    charts: list[JsonDict] = []
     nodes: list[JsonDict] = []
     links: list[JsonDict] = []
+    branches: list[JsonDict] = []
+    legs: list[JsonDict] = []
     xrefs: list[JsonDict] = []
     body_lines: list[str] = []
-    content = xml_child(elem, "SFCContent")
-    if content is None:
+    contents = xml_children(elem, "SFCContent")
+    if not contents:
         return {}
 
-    unit_id = f"{routine_id}.SFC"
-    for index, child in enumerate(list(content)):
-        child_name = local_name(child.tag)
-        if child_name == "DirectedLink":
-            links.append(_sfc_link(child, routine_id, unit_id, owner, program, len(links)))
-            continue
-        if child_name not in SFC_NODE_ELEMENTS:
-            continue
-        node = _sfc_node(child, routine_id, unit_id, owner, program, len(nodes))
-        nodes.append(node)
-        for action in node.get("actions", []):
-            nodes.append(
-                _compact(
+    for content_index, content in enumerate(contents):
+        chart_id = _sfc_chart_id(routine_id, content_index)
+        online_edit_type = content.attrib.get("OnlineEditType")
+        chart_node_start = len(nodes)
+        chart_link_start = len(links)
+        chart_branch_start = len(branches)
+        chart_leg_start = len(legs)
+        for child, parent_branch_id, parent_leg_id in _iter_sfc_content(content):
+            child_name = local_name(child.tag)
+            if child_name == "DirectedLink":
+                links.append(
+                    _sfc_link(
+                        child,
+                        routine_id,
+                        chart_id,
+                        owner,
+                        program,
+                        len(links),
+                        content_index=content_index,
+                        online_edit_type=online_edit_type,
+                        parent_branch_id=parent_branch_id,
+                        parent_leg_id=parent_leg_id,
+                    )
+                )
+                continue
+            if child_name not in SFC_NODE_ELEMENTS:
+                continue
+            node = _sfc_node(
+                child,
+                routine_id,
+                chart_id,
+                owner,
+                program,
+                len(nodes),
+                content_index=content_index,
+                online_edit_type=online_edit_type,
+                parent_branch_id=parent_branch_id,
+                parent_leg_id=parent_leg_id,
+            )
+            nodes.append(node)
+            if child_name == "Branch":
+                branch = _sfc_branch(
+                    child,
+                    routine_id,
+                    chart_id,
+                    owner,
+                    program,
+                    len(branches),
+                    content_index=content_index,
+                    online_edit_type=online_edit_type,
+                    parent_branch_id=parent_branch_id,
+                    parent_leg_id=parent_leg_id,
+                )
+                branches.append(branch)
+                legs.extend(
+                    _sfc_legs(
+                        child,
+                        routine_id,
+                        chart_id,
+                        owner,
+                        program,
+                        branch,
+                        len(legs),
+                        content_index=content_index,
+                        online_edit_type=online_edit_type,
+                    )
+                )
+            for action in node.get("actions", []):
+                action_node = _compact(
                     {
                         "kind": "sfc_node",
-                        "id": f"{unit_id}.Node:{action.get('id')}:Action",
+                        "id": f"{chart_id}.Node:{action.get('id')}:Action",
                         "routine_id": routine_id,
-                        "unit_id": unit_id,
+                        "unit_id": chart_id,
+                        "chart_id": chart_id,
+                        "content_index": content_index,
+                        "online_edit_type": online_edit_type,
                         "owner": owner,
                         "program": program,
                         "node_type": "Action",
@@ -354,40 +447,81 @@ def _extract_sfc(elem: ET.Element, routine_id: str, owner: str, program: str | N
                         "operand": action.get("operand"),
                         "qualifier": action.get("qualifier"),
                         "parent_step_id": node.get("node_id"),
+                        "parent_branch_id": parent_branch_id,
+                        "parent_leg_id": parent_leg_id,
                         "st_body": action.get("st_body"),
                         "attributes": action.get("attributes", {}),
                     }
                 )
-            )
-        body_lines.extend(_sfc_node_text(node))
-        for body in node.get("st_bodies", []):
-            xrefs.extend(
-                xrefs_from_structured_text(
-                    body.get("text", ""),
-                    routine=routine_id,
-                    source=node["id"],
-                    location=f"{node.get('node_type')} {node.get('operand') or node.get('node_id')}",
+                nodes.append(action_node)
+                if action.get("st_body"):
+                    xrefs.extend(
+                        _sfc_chart_xrefs(
+                            _xrefs_from_sfc_st_body(
+                                action.get("st_body") or "",
+                                routine_id,
+                                action_node["id"],
+                                f"Action {action.get('operand') or action.get('id')}",
+                            ),
+                            chart_id,
+                            content_index,
+                            online_edit_type,
+                        )
+                    )
+            body_lines.extend(_sfc_node_text(node))
+            for body in node.get("st_bodies", []):
+                if body.get("kind") == "action":
+                    continue
+                xrefs.extend(
+                    _sfc_chart_xrefs(
+                        _xrefs_from_sfc_st_body(
+                            body.get("text", ""),
+                            routine_id,
+                            node["id"],
+                            f"{node.get('node_type')} {node.get('operand') or node.get('node_id')}",
+                        ),
+                        chart_id,
+                        content_index,
+                        online_edit_type,
+                    )
                 )
-            )
-        for symbol in extract_tag_references(str(node.get("operand") or ""), include_calls=False):
-            xrefs.append(_ref(symbol, routine_id, "read_write", "SFC_OPERAND", node["id"]))
-    units.append(
-        _compact(
+            for symbol in extract_tag_references(str(node.get("operand") or ""), include_calls=False):
+                ref = _ref(symbol, routine_id, "read_write", "SFC_OPERAND", node["id"])
+                ref.update({"chart_id": chart_id, "content_index": content_index, "online_edit_type": online_edit_type})
+                xrefs.append(_compact(ref))
+
+        chart = _compact(
             {
                 "kind": "sfc_chart",
-                "id": unit_id,
+                "id": chart_id,
+                "chart_id": chart_id,
                 "routine_id": routine_id,
                 "routine": elem.attrib.get("Name"),
                 "owner": owner,
                 "program": program,
                 "language": "SFC",
-                "node_count": len(nodes),
-                "link_count": len(links),
+                "sequence": content_index,
+                "content_index": content_index,
+                "online_edit_type": online_edit_type,
+                "node_count": len(nodes) - chart_node_start,
+                "link_count": len(links) - chart_link_start,
+                "branch_count": len(branches) - chart_branch_start,
+                "leg_count": len(legs) - chart_leg_start,
                 "attributes": xml_attributes(content),
             }
         )
-    )
-    return {"routine_units": units, "sfc_nodes": nodes, "sfc_links": links, "xrefs": xrefs, "body_lines": body_lines}
+        charts.append(chart)
+        units.append(chart)
+    return {
+        "routine_units": units,
+        "sfc_charts": charts,
+        "sfc_nodes": nodes,
+        "sfc_links": links,
+        "sfc_branches": branches,
+        "sfc_legs": legs,
+        "xrefs": xrefs,
+        "body_lines": body_lines,
+    }
 
 
 def _fbd_node(
@@ -522,6 +656,11 @@ def _sfc_node(
     owner: str,
     program: str | None,
     index: int,
+    *,
+    content_index: int = 0,
+    online_edit_type: str | None = None,
+    parent_branch_id: str | None = None,
+    parent_leg_id: str | None = None,
 ) -> JsonDict:
     node_type = local_name(elem.tag)
     node_id = elem.attrib.get("ID") or str(index)
@@ -553,11 +692,16 @@ def _sfc_node(
             "id": f"{unit_id}.Node:{node_id}:{node_type}",
             "routine_id": routine_id,
             "unit_id": unit_id,
+            "chart_id": unit_id,
+            "content_index": content_index,
+            "online_edit_type": online_edit_type,
             "owner": owner,
             "program": program,
             "node_type": node_type,
             "node_id": node_id,
             "operand": elem.attrib.get("Operand"),
+            "parent_branch_id": parent_branch_id,
+            "parent_leg_id": parent_leg_id,
             "initial_step": elem.attrib.get("InitialStep"),
             "x": elem.attrib.get("X"),
             "y": elem.attrib.get("Y"),
@@ -577,6 +721,11 @@ def _sfc_link(
     owner: str,
     program: str | None,
     index: int,
+    *,
+    content_index: int = 0,
+    online_edit_type: str | None = None,
+    parent_branch_id: str | None = None,
+    parent_leg_id: str | None = None,
 ) -> JsonDict:
     return _compact(
         {
@@ -584,13 +733,118 @@ def _sfc_link(
             "id": f"{unit_id}.Link:{index:04d}",
             "routine_id": routine_id,
             "unit_id": unit_id,
+            "chart_id": unit_id,
+            "content_index": content_index,
+            "online_edit_type": online_edit_type,
             "owner": owner,
             "program": program,
             "from_id": elem.attrib.get("FromID"),
             "to_id": elem.attrib.get("ToID"),
+            "parent_branch_id": parent_branch_id,
+            "parent_leg_id": parent_leg_id,
             "attributes": xml_attributes(elem),
         }
     )
+
+
+def _sfc_chart_id(routine_id: str, content_index: int) -> str:
+    return f"{routine_id}.SFC" if content_index == 0 else f"{routine_id}.SFC:{content_index}"
+
+
+def _iter_sfc_content(
+    elem: ET.Element,
+    *,
+    parent_branch_id: str | None = None,
+    parent_leg_id: str | None = None,
+):
+    for child in list(elem):
+        child_name = local_name(child.tag)
+        if child_name == "Leg":
+            leg_id = child.attrib.get("ID") or parent_leg_id
+            yield from _iter_sfc_content(child, parent_branch_id=parent_branch_id, parent_leg_id=leg_id)
+            continue
+        yield child, parent_branch_id, parent_leg_id
+        if child_name == "Branch":
+            branch_id = child.attrib.get("ID") or parent_branch_id
+            for leg in xml_children(child, "Leg"):
+                leg_id = leg.attrib.get("ID") or parent_leg_id
+                yield from _iter_sfc_content(leg, parent_branch_id=branch_id, parent_leg_id=leg_id)
+
+
+def _sfc_branch(
+    elem: ET.Element,
+    routine_id: str,
+    chart_id: str,
+    owner: str,
+    program: str | None,
+    index: int,
+    *,
+    content_index: int,
+    online_edit_type: str | None,
+    parent_branch_id: str | None = None,
+    parent_leg_id: str | None = None,
+) -> JsonDict:
+    branch_id = elem.attrib.get("ID") or str(index)
+    return _compact(
+        {
+            "kind": "sfc_branch",
+            "id": f"{chart_id}.Branch:{branch_id}",
+            "routine_id": routine_id,
+            "unit_id": chart_id,
+            "chart_id": chart_id,
+            "content_index": content_index,
+            "online_edit_type": online_edit_type,
+            "owner": owner,
+            "program": program,
+            "branch_id": branch_id,
+            "node_id": branch_id,
+            "parent_branch_id": parent_branch_id,
+            "parent_leg_id": parent_leg_id,
+            "branch_type": elem.attrib.get("BranchType"),
+            "branch_flow": elem.attrib.get("BranchFlow"),
+            "priority": elem.attrib.get("Priority"),
+            "leg_ids": [leg.attrib.get("ID") for leg in xml_children(elem, "Leg") if leg.attrib.get("ID")],
+            "attributes": xml_attributes(elem),
+        }
+    )
+
+
+def _sfc_legs(
+    elem: ET.Element,
+    routine_id: str,
+    chart_id: str,
+    owner: str,
+    program: str | None,
+    branch: JsonDict,
+    start_index: int,
+    *,
+    content_index: int,
+    online_edit_type: str | None,
+) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for offset, leg in enumerate(xml_children(elem, "Leg")):
+        leg_id = leg.attrib.get("ID") or str(start_index + offset)
+        rows.append(
+            _compact(
+                {
+                    "kind": "sfc_leg",
+                    "id": f"{chart_id}.Branch:{branch.get('branch_id')}.Leg:{leg_id}",
+                    "routine_id": routine_id,
+                    "unit_id": chart_id,
+                    "chart_id": chart_id,
+                    "content_index": content_index,
+                    "online_edit_type": online_edit_type,
+                    "owner": owner,
+                    "program": program,
+                    "branch_id": branch.get("branch_id"),
+                    "parent_branch_id": branch.get("parent_branch_id"),
+                    "leg_id": leg_id,
+                    "sequence": offset,
+                    "attributes": xml_attributes(leg),
+                }
+            )
+        )
+    return rows
 
 
 def _st_body(content: ET.Element | None) -> str:
@@ -644,6 +898,32 @@ def _ref(symbol: str, routine_id: str, access: str, instruction: str, source: st
         "operand": symbol,
         "base_symbol": symbol.split(".", 1)[0].split("[", 1)[0],
     }
+
+
+def _xrefs_from_sfc_st_body(text: str, routine_id: str, source: str, location: str) -> list[JsonDict]:
+    rows = xrefs_from_structured_text(text, routine=routine_id, source=source, location=location)
+    seen = {row.get("symbol") for row in rows}
+    for symbol in extract_tag_references(text, include_calls=False):
+        if symbol not in seen:
+            rows.append(_ref(symbol, routine_id, "read", "SFC_ST", source))
+            seen.add(symbol)
+    return rows
+
+
+def _sfc_chart_xrefs(
+    refs: list[JsonDict],
+    chart_id: str,
+    content_index: int,
+    online_edit_type: str | None,
+) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for ref in refs:
+        row = dict(ref)
+        row["chart_id"] = chart_id
+        row["content_index"] = content_index
+        row["online_edit_type"] = online_edit_type
+        rows.append(_compact(row))
+    return rows
 
 
 def _annotate_xrefs(xrefs: list[JsonDict], routine: JsonDict) -> list[JsonDict]:

@@ -1,9 +1,8 @@
 """Fail-closed scaffolding for optional Logix Designer SDK integration.
 
-This module is intentionally not imported by ``server.py``. It defines the
-future SDK boundary, local compact logging, and runtime-evidence helpers without
-opening projects, connecting to a controller, or importing the SDK at module
-import time.
+This module defines the SDK boundary, local compact logging, simulation harness,
+and runtime-evidence helpers without opening projects, connecting to a
+controller, or importing the optional SDK at module import time.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 import hashlib
 import json
+import math
 import re
 import uuid
 
@@ -29,6 +29,11 @@ SDK_LOG_DIR = Path(".tmp") / "sdk_logs"
 SDK_EXPORT_DIR = Path(".tmp") / "sdk_exports"
 MAX_COMPACT_STRING_CHARS = 300
 MAX_COMPACT_COLLECTION_ITEMS = 20
+MAX_RUNTIME_POLL_TAGS = 32
+MAX_RUNTIME_POLL_SAMPLES = 5_000
+MAX_RUNTIME_QUERY_LIMIT = 1_000
+DEFAULT_SIMULATED_INTERVAL_SECONDS = 1.0
+SIMULATED_RUNTIME_SOURCE = "simulated_sdk_runtime"
 
 SDK_SURFACE_EXPORT_OFFLINE = "export_offline_scratch"
 SDK_SURFACE_RUNTIME_READ = "runtime_read"
@@ -546,6 +551,242 @@ def write_runtime_evidence(
     return {"ok": True, "path": str(path), "bytes": len(text), "record": refreshed}
 
 
+def simulate_runtime_tag_stream(
+    workspace: str | Path | None,
+    tags: Iterable[str],
+    *,
+    samples: int = 10,
+    interval_seconds: float = DEFAULT_SIMULATED_INTERVAL_SECONDS,
+    data_type: str = "REAL",
+    signal: str = "sine",
+    amplitude: float = 100.0,
+    offset: float = 0.0,
+    period_samples: int = 20,
+    mode: str = SDK_RUNTIME_OFFLINE,
+    scope: str | None = None,
+    controller_identity: Mapping[str, Any] | None = None,
+    permission: RuntimeReadPermission | None = None,
+    retention_policy: Mapping[str, Any] | None = None,
+    ttl_seconds: int = DEFAULT_RUNTIME_TTL_SECONDS,
+    source_fingerprint: str | None = None,
+    observed_start: datetime | None = None,
+    session_id: str | None = None,
+    persist: bool = True,
+    preview_limit: int = 20,
+) -> JsonDict:
+    """Generate deterministic SDK-style runtime samples for harness testing.
+
+    The simulator never imports the optional SDK or touches a controller. It
+    exercises the same permission, compact-evidence, and freshness contracts that
+    a future SDK read runner must use.
+    """
+
+    normalized_tags = _normalize_tags(tags)
+    normalized_samples = _bounded_int(samples, minimum=1, maximum=MAX_RUNTIME_POLL_SAMPLES, name="samples")
+    if len(normalized_tags) > MAX_RUNTIME_POLL_TAGS:
+        raise SdkPermissionError(f"Runtime read requested {len(normalized_tags)} tags, limit is {MAX_RUNTIME_POLL_TAGS}")
+    interval = float(interval_seconds)
+    if interval < 0:
+        raise ValueError("interval_seconds must be >= 0")
+    normalized_type = str(data_type or "REAL").upper()
+    capability = _capability_for_data_type(normalized_type)
+    normalized_mode = normalize_runtime_mode(mode)
+    observed = observed_start or utc_now()
+    if permission is None:
+        permission = RuntimeReadPermission(
+            capability=capability,
+            reason="simulated runtime read harness",
+            approved_by="Adrian Acurero",
+            allow_online=normalized_mode == SDK_RUNTIME_ONLINE,
+            comm_path="SIMULATED" if normalized_mode == SDK_RUNTIME_ONLINE else None,
+            max_tags=len(normalized_tags),
+            expires_at=format_utc(observed + timedelta(seconds=max(ttl_seconds, DEFAULT_RUNTIME_TTL_SECONDS))),
+        )
+    validate_runtime_permission(capability, permission, mode=normalized_mode, tag_count=len(normalized_tags), now=observed)
+
+    normalized_signal = _normalize_signal(signal)
+    normalized_period = _bounded_int(period_samples, minimum=1, maximum=MAX_RUNTIME_POLL_SAMPLES, name="period_samples")
+    runtime_session_id = session_id or f"sim-{uuid.uuid4().hex[:12]}"
+    identity = dict(
+        controller_identity
+        or {
+            "name": "Simulated Logix Runtime",
+            "source": SIMULATED_RUNTIME_SOURCE,
+            "simulated": True,
+        }
+    )
+    retention = dict(
+        retention_policy
+        or {
+            "ttl_seconds": ttl_seconds,
+            "purge": "manual",
+            "source": SIMULATED_RUNTIME_SOURCE,
+        }
+    )
+    fingerprint = source_fingerprint or fingerprint_text(
+        "|".join([SIMULATED_RUNTIME_SOURCE, ",".join(normalized_tags), normalized_type, normalized_signal, str(amplitude), str(offset)])
+    )
+
+    records: list[JsonDict] = []
+    interval_us = int(round(interval * 1_000_000))
+    for sample_index in range(normalized_samples):
+        sample_time = observed + timedelta(microseconds=interval_us * sample_index)
+        for tag_index, tag in enumerate(normalized_tags):
+            raw_value = _simulated_signal_value(
+                sample_index,
+                tag_index=tag_index,
+                tag_count=len(normalized_tags),
+                signal=normalized_signal,
+                amplitude=float(amplitude),
+                offset=float(offset),
+                period_samples=normalized_period,
+            )
+            value = _coerce_simulated_value(raw_value, normalized_type)
+            record = build_runtime_evidence(
+                evidence_type="tag_value_sample",
+                source_fingerprint=fingerprint,
+                mode=normalized_mode,
+                controller_identity=identity,
+                permission=permission,
+                retention_policy=retention,
+                ttl_seconds=ttl_seconds,
+                scope=scope,
+                tag=tag,
+                value=value,
+                observed_at=sample_time,
+            )
+            record.update(
+                {
+                    "source": SIMULATED_RUNTIME_SOURCE,
+                    "session_id": runtime_session_id,
+                    "sample_index": sample_index,
+                    "sample_elapsed_seconds": round(interval * sample_index, 6),
+                    "sample_interval_seconds": interval,
+                    "data_type": normalized_type,
+                    "signal": normalized_signal,
+                    "quality": "simulated",
+                }
+            )
+            records.append(record)
+
+    written_paths: list[str] = []
+    if persist:
+        if workspace is None:
+            raise SdkSecurityError("workspace is required when persist=True")
+        for record in records:
+            written = write_runtime_evidence(workspace, record, now=observed)
+            if len(written_paths) < preview_limit:
+                written_paths.append(str(written["path"]))
+
+    preview = [_runtime_evidence_preview(record) for record in records[: max(int(preview_limit or 0), 0)]]
+    first_observed = records[0]["observed_at"] if records else None
+    last_observed = records[-1]["observed_at"] if records else None
+    return {
+        "ok": True,
+        "operation": "simulate_runtime_tag_stream",
+        "source": SIMULATED_RUNTIME_SOURCE,
+        "persisted": bool(persist),
+        "session_id": runtime_session_id,
+        "mode": normalized_mode,
+        "data_type": normalized_type,
+        "signal": normalized_signal,
+        "tag_count": len(normalized_tags),
+        "sample_count": normalized_samples,
+        "record_count": len(records),
+        "first_observed_at": first_observed,
+        "last_observed_at": last_observed,
+        "records_preview": preview,
+        "records_truncated": max(0, len(records) - len(preview)),
+        "paths_preview": written_paths,
+        "paths_truncated": max(0, len(records) - len(written_paths)) if persist else 0,
+    }
+
+
+def query_runtime_evidence(
+    workspace: str | Path,
+    *,
+    tag: str | None = None,
+    scope: str | None = None,
+    freshness: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    now: datetime | None = None,
+) -> JsonDict:
+    """Return compact runtime evidence rows from the volatile evidence store."""
+
+    root = runtime_evidence_dir(workspace)
+    normalized_limit = _bounded_int(limit, minimum=0, maximum=MAX_RUNTIME_QUERY_LIMIT, name="limit")
+    normalized_offset = max(int(offset or 0), 0)
+    normalized_freshness = str(freshness).lower() if freshness else None
+    if normalized_freshness and normalized_freshness not in {"fresh", "stale"}:
+        raise SdkSecurityError(f"Unsupported freshness filter: {freshness}")
+
+    rows: list[JsonDict] = []
+    if root.exists():
+        for path in sorted(root.glob("*.json")):
+            record = read_runtime_evidence(path, now=now)
+            if tag and record.get("tag") != tag:
+                continue
+            if scope and record.get("scope") != scope:
+                continue
+            if normalized_freshness and record.get("freshness") != normalized_freshness:
+                continue
+            row = _runtime_evidence_preview(record)
+            row["path"] = str(path)
+            rows.append(row)
+
+    rows.sort(key=lambda row: (str(row.get("observed_at") or ""), int(row.get("sample_index") or 0), str(row.get("tag") or "")), reverse=True)
+    page = rows[normalized_offset : normalized_offset + normalized_limit]
+    return {
+        "items": page,
+        "total": len(rows),
+        "offset": normalized_offset,
+        "limit": normalized_limit,
+        "has_more": normalized_offset + len(page) < len(rows),
+        "truncated": max(0, len(rows) - normalized_offset - len(page)),
+    }
+
+
+def runtime_evidence_summary(workspace: str | Path, *, now: datetime | None = None) -> JsonDict:
+    """Summarize runtime evidence without returning full records."""
+
+    root = runtime_evidence_dir(workspace)
+    by_freshness: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    by_tag: dict[str, JsonDict] = {}
+    total = 0
+    if root.exists():
+        for path in sorted(root.glob("*.json")):
+            record = read_runtime_evidence(path, now=now)
+            total += 1
+            fresh = str(record.get("freshness") or "unknown")
+            source = str(record.get("source") or record.get("evidence_type") or "unknown")
+            by_freshness[fresh] = by_freshness.get(fresh, 0) + 1
+            by_source[source] = by_source.get(source, 0) + 1
+            tag = str(record.get("tag") or "")
+            if tag:
+                current = by_tag.get(tag)
+                observed_at = str(record.get("observed_at") or "")
+                if current is None or observed_at >= str(current.get("observed_at") or ""):
+                    by_tag[tag] = {
+                        "tag": tag,
+                        "scope": record.get("scope"),
+                        "observed_at": observed_at,
+                        "freshness": fresh,
+                        "value": compact_json_value(record.get("value")),
+                        "data_type": record.get("data_type"),
+                        "source": source,
+                        "session_id": record.get("session_id"),
+                    }
+    return {
+        "total": total,
+        "by_freshness": by_freshness,
+        "by_source": by_source,
+        "tags": sorted(by_tag.values(), key=lambda item: str(item.get("tag") or "")),
+        "storage": str(root),
+    }
+
+
 def read_runtime_evidence(path: str | Path, *, now: datetime | None = None) -> JsonDict:
     """Read a runtime-evidence file and recompute fresh/stale in memory."""
 
@@ -627,6 +868,110 @@ def compact_json_value(value: Any) -> Any:
             items.append({"truncated_items": len(value) - MAX_COMPACT_COLLECTION_ITEMS})
         return items
     return compact_json_value(str(value))
+
+
+def _normalize_tags(tags: Iterable[str]) -> list[str]:
+    normalized = [str(tag).strip() for tag in tags if str(tag).strip()]
+    if not normalized:
+        raise SdkPermissionError("Runtime reads must request at least one tag")
+    return normalized
+
+
+def _bounded_int(value: int | str | float, *, minimum: int, maximum: int, name: str) -> int:
+    number = int(value)
+    if number < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    if number > maximum:
+        raise ValueError(f"{name} must be <= {maximum}")
+    return number
+
+
+def _capability_for_data_type(data_type: str) -> str:
+    normalized = str(data_type or "").upper()
+    mapping = {
+        "BOOL": "sdk_read_tag_value_bool",
+        "SINT": "sdk_read_tag_value_sint",
+        "INT": "sdk_read_tag_value_int",
+        "DINT": "sdk_read_tag_value_dint",
+        "LINT": "sdk_read_tag_value_lint",
+        "USINT": "sdk_read_tag_value_usint",
+        "UINT": "sdk_read_tag_value_uint",
+        "UDINT": "sdk_read_tag_value_udint",
+        "ULINT": "sdk_read_tag_value_ulint",
+        "STRING": "sdk_read_tag_value_string",
+        "REAL": "sdk_read_tag_value_real",
+        "LREAL": "sdk_read_tag_value_lreal",
+    }
+    try:
+        return mapping[normalized]
+    except KeyError as exc:
+        raise SdkSecurityError(f"Unsupported simulated tag data_type: {data_type}") from exc
+
+
+def _normalize_signal(signal: str) -> str:
+    normalized = str(signal or "sine").lower()
+    if normalized not in {"sine", "sawtooth", "triangle", "square"}:
+        raise SdkSecurityError(f"Unsupported simulated signal: {signal}")
+    return normalized
+
+
+def _simulated_signal_value(
+    sample_index: int,
+    *,
+    tag_index: int,
+    tag_count: int,
+    signal: str,
+    amplitude: float,
+    offset: float,
+    period_samples: int,
+) -> float:
+    tag_phase = tag_index / max(tag_count, 1)
+    phase = ((sample_index / max(period_samples, 1)) + tag_phase) % 1.0
+    if signal == "sine":
+        return offset + amplitude * math.sin(2.0 * math.pi * phase)
+    if signal == "sawtooth":
+        return offset + amplitude * ((2.0 * phase) - 1.0)
+    if signal == "triangle":
+        return offset + amplitude * (1.0 - (4.0 * abs(phase - 0.5)))
+    if signal == "square":
+        return offset + (amplitude if phase < 0.5 else -amplitude)
+    raise SdkSecurityError(f"Unsupported simulated signal: {signal}")
+
+
+def _coerce_simulated_value(value: float, data_type: str) -> Any:
+    if data_type == "BOOL":
+        return bool(value >= 0)
+    if data_type == "STRING":
+        return str(round(value, 6))
+    if data_type in {"REAL", "LREAL"}:
+        return round(float(value), 6)
+    return int(round(value))
+
+
+def _runtime_evidence_preview(record: Mapping[str, Any]) -> JsonDict:
+    controller = record.get("controller_identity")
+    controller_name = controller.get("name") if isinstance(controller, Mapping) else None
+    return {
+        key: value
+        for key, value in {
+            "evidence_type": record.get("evidence_type"),
+            "observed_at": record.get("observed_at"),
+            "expires_at": record.get("expires_at"),
+            "freshness": record.get("freshness"),
+            "mode": record.get("mode"),
+            "scope": record.get("scope"),
+            "tag": record.get("tag"),
+            "value": compact_json_value(record.get("value")),
+            "data_type": record.get("data_type"),
+            "source": record.get("source"),
+            "quality": record.get("quality"),
+            "session_id": record.get("session_id"),
+            "sample_index": record.get("sample_index"),
+            "sample_elapsed_seconds": record.get("sample_elapsed_seconds"),
+            "controller": controller_name,
+        }.items()
+        if value not in (None, "")
+    }
 
 
 def _as_utc(value: datetime) -> datetime:

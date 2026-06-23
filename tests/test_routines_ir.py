@@ -204,3 +204,75 @@ def test_extract_sfc_units_include_steps_actions_transitions_branches_links_and_
     assert units[3]["kind"] == "directed_link"
     assert units[3]["show"] is True
     json.dumps(routine_ir_from_element(routine, routine_id="Program:Main.Routine:Seq"))
+
+
+def test_sfc_ir_preserves_multiple_content_variants_and_nested_branch_context():
+    routine = _xml(
+        """
+        <Routine Name="Seq" Type="SFC">
+          <SFCContent OnlineEditType="Original">
+            <Step ID="0" X="100" Y="120" Operand="Step_000" InitialStep="true"/>
+            <Branch ID="10" Y="300" BranchType="Selection" BranchFlow="Diverge">
+              <Leg ID="11">
+                <Step ID="12" X="200" Y="360" Operand="NestedStep"/>
+              </Leg>
+            </Branch>
+            <DirectedLink FromID="0" ToID="12"/>
+          </SFCContent>
+          <SFCContent OnlineEditType="Pending">
+            <Step ID="100" X="100" Y="120" Operand="PendingStep">
+              <Action ID="101" Operand="PendingAction" Qualifier="NonStored">
+                <Body>
+                  <STContent>
+                    <Line Number="0"><![CDATA[OutTag := InTag;]]></Line>
+                  </STContent>
+                </Body>
+              </Action>
+            </Step>
+            <Transition ID="102" X="100" Y="240" Operand="PendingTransition">
+              <Condition>
+                <STContent>
+                  <Line Number="0"><![CDATA[ReadyTag]]></Line>
+                </STContent>
+              </Condition>
+            </Transition>
+            <DirectedLink FromID="100" ToID="102"/>
+          </SFCContent>
+        </Routine>
+        """
+    )
+
+    compat_units = extract_sfc_units(routine, routine_id="Program:Main.Routine:Seq")
+    pending_step = next(unit for unit in compat_units if unit.get("operand") == "PendingStep")
+    assert pending_step["content_index"] == 1
+    assert pending_step["online_edit_type"] == "Pending"
+
+    bundle = routine_ir_from_element(
+        routine,
+        routine_id="Program:Main.Routine:Seq",
+        owner="Program:Main",
+        program="Main",
+    )
+    charts = bundle["sfc_charts"]
+    assert [chart["online_edit_type"] for chart in charts] == ["Original", "Pending"]
+    assert [chart["node_count"] for chart in charts] == [3, 3]
+    assert [chart["link_count"] for chart in charts] == [1, 1]
+    assert charts[0]["branch_count"] == 1
+    assert charts[0]["leg_count"] == 1
+
+    nested_step = next(node for node in bundle["sfc_nodes"] if node.get("operand") == "NestedStep")
+    assert nested_step["chart_id"] == charts[0]["chart_id"]
+    assert nested_step["parent_branch_id"] == "10"
+    assert nested_step["parent_leg_id"] == "11"
+    assert bundle["sfc_branches"][0]["branch_id"] == "10"
+    assert bundle["sfc_legs"][0]["leg_id"] == "11"
+
+    pending_chart_id = charts[1]["chart_id"]
+    pending_symbols = {
+        (ref["symbol"], ref["access"], ref.get("chart_id"))
+        for ref in bundle["xrefs"]
+        if ref.get("chart_id") == pending_chart_id
+    }
+    assert ("OutTag", "write", pending_chart_id) in pending_symbols
+    assert ("InTag", "read", pending_chart_id) in pending_symbols
+    assert ("ReadyTag", "read", pending_chart_id) in pending_symbols

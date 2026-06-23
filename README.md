@@ -148,6 +148,12 @@ are never created unless `spill=true` is passed explicitly.
 - `resolve_alarm(name_or_class, limit=10)`
 - `decode_summary(tag, limit=50)`
 - `aoi_instance_bindings(instance=None, name=None, detail="summary", limit=10, spill=false)`
+- `sdk_status()` - optional SDK availability plus the fail-closed allowlist.
+- `runtime_evidence_summary()` - counts and latest values from volatile runtime evidence.
+- `list_runtime_evidence(tag=None, scope=None, freshness=None, limit=50, offset=0)` -
+  compact runtime evidence rows stored outside canonical IR.
+- `simulate_runtime_read_preview(tags, samples=5, ...)` - deterministic SDK-style
+  moving-value preview without writing evidence or touching a controller.
 
 ### Analysis
 
@@ -170,6 +176,12 @@ are never created unless `spill=true` is passed explicitly.
   controller mode changes, tag writes, imports, safety/protect/lock, and SD-card
   operations are denied from the normal MCP surface. Runtime evidence belongs in
   `runtime_evidence/` with TTL/freshness metadata, not in canonical `ir/`.
+- Simulated runtime reads can be exercised without joysticks or a PLC:
+  ```powershell
+  python -m logix_mcp simulate-runtime .\Arnold_0058_029_062226.logix --tag SWING_PORT_ARM_JS.Axis --tag SWING_STBD_ARM_JS.Axis --samples 20 --signal sawtooth
+  ```
+  This writes only volatile `runtime_evidence/` records unless `--preview-only`
+  is used.
 - Cross-references are classified from a per-instruction signature table
   (including ALMD/ALMA, which also emit a derived `<tag>.InAlarm` write) and
   from AOI parameter usage, and each row carries a `confidence` (`typed` vs

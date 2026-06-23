@@ -195,6 +195,62 @@ def test_runtime_evidence_stays_separate_from_ir_and_tracks_freshness(tmp_path: 
     assert sdk_adapter.list_runtime_evidence(tmp_path, now=FIXED_NOW + timedelta(seconds=31))[0]["freshness"] == "stale"
 
 
+def test_simulated_runtime_stream_writes_moving_evidence(tmp_path: Path):
+    result = sdk_adapter.simulate_runtime_tag_stream(
+        tmp_path,
+        ["SWING_PORT_ARM_JS.Axis", "SWING_STBD_ARM_JS.Axis"],
+        samples=4,
+        interval_seconds=1,
+        data_type="REAL",
+        signal="sawtooth",
+        amplitude=10,
+        offset=50,
+        period_samples=4,
+        scope="Controller",
+        observed_start=FIXED_NOW,
+        ttl_seconds=30,
+    )
+
+    assert result["ok"] is True
+    assert result["source"] == sdk_adapter.SIMULATED_RUNTIME_SOURCE
+    assert result["record_count"] == 8
+    assert result["persisted"] is True
+    assert result["paths_preview"]
+    values = [item["value"] for item in result["records_preview"] if item["tag"] == "SWING_PORT_ARM_JS.Axis"]
+    assert len(set(values)) > 1
+
+    query = sdk_adapter.query_runtime_evidence(tmp_path, tag="SWING_PORT_ARM_JS.Axis", now=FIXED_NOW + timedelta(seconds=2))
+    assert query["total"] == 4
+    assert query["items"][0]["tag"] == "SWING_PORT_ARM_JS.Axis"
+    assert query["items"][0]["source"] == sdk_adapter.SIMULATED_RUNTIME_SOURCE
+    assert "comm_path" not in json.dumps(query)
+
+    stale = sdk_adapter.query_runtime_evidence(
+        tmp_path,
+        tag="SWING_PORT_ARM_JS.Axis",
+        freshness="stale",
+        now=FIXED_NOW + timedelta(seconds=35),
+    )
+    assert stale["total"] == 4
+
+
+def test_simulated_runtime_preview_does_not_write_evidence(tmp_path: Path):
+    result = sdk_adapter.simulate_runtime_tag_stream(
+        None,
+        ["TagA"],
+        samples=3,
+        data_type="DINT",
+        signal="triangle",
+        persist=False,
+        observed_start=FIXED_NOW,
+    )
+
+    assert result["ok"] is True
+    assert result["persisted"] is False
+    assert result["record_count"] == 3
+    assert not (tmp_path / "runtime_evidence").exists()
+
+
 def test_scratch_export_paths_are_confined_to_ignored_tmp(tmp_path: Path):
     target = sdk_adapter.validate_scratch_output_path(tmp_path, "snapshot.L5X")
 
@@ -217,3 +273,7 @@ def test_sdk_upload_is_not_registered_as_a_normal_mcp_tool(tmp_path: Path):
     assert "upload_to_new_project" not in tool_names
     assert "sdk_upload_to_new_project" not in tool_names
     assert not tool_names & sdk_adapter.PUBLIC_DENIED_NAMES
+    assert "sdk_status" in tool_names
+    assert "runtime_evidence_summary" in tool_names
+    assert "list_runtime_evidence" in tool_names
+    assert "simulate_runtime_read_preview" in tool_names

@@ -41,3 +41,4 @@ snapshots/
 # Local scratch outputs.
 $out
 .tmp/
+debates/

@@ -14,7 +14,7 @@ from logix_mcp.intelligence import coverage_limits, get_routine_slice
 from logix_mcp.server import create_server, envelope, module_context_view, probe_envelope, resolve_alias, summarize_row
 from logix_mcp.workspace import ingest_l5x, read_jsonl
 
-from test_parser_workspace import SIMPLE_L5X
+from test_parser_workspace import SIMPLE_L5X, _source_fragment_l5x
 
 
 BUDGET_CHARS = 50_000
@@ -35,6 +35,10 @@ DEFAULT_CALLS = [
     ("get_module_context", {"module": "Local"}),
     ("aoi_instance_bindings", {"instance": "Motor_AOI_01"}),
     ("run_diagnostics", {}),
+    ("sdk_status", {}),
+    ("runtime_evidence_summary", {}),
+    ("list_runtime_evidence", {}),
+    ("simulate_runtime_read_preview", {"tags": "StartPB", "samples": 2}),
 ]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +120,24 @@ def _sfc_fixture() -> str:
                 </Condition>
               </Transition>
               <DirectedLink FromID="0" ToID="1" Show="true"/>
+            </SFCContent>
+          </Routine>
+"""
+    return SIMPLE_L5X.replace('          <Routine Name="Calc" Type="ST">', sfc_routine + '          <Routine Name="Calc" Type="ST">', 1)
+
+
+def _sfc_variant_fixture() -> str:
+    sfc_routine = """
+          <Routine Name="Seq" Type="SFC">
+            <SFCContent OnlineEditType="Original">
+              <Step ID="0" X="100" Y="120" Operand="Step_000" InitialStep="true"/>
+              <Transition ID="1" X="100" Y="240" Operand="Tran_000"/>
+              <DirectedLink FromID="0" ToID="1" Show="true"/>
+            </SFCContent>
+            <SFCContent OnlineEditType="Pending">
+              <Step ID="10" X="100" Y="120" Operand="PendingStep"/>
+              <Transition ID="11" X="100" Y="240" Operand="PendingTran"/>
+              <DirectedLink FromID="10" ToID="11" Show="true"/>
             </SFCContent>
           </Routine>
 """
@@ -233,6 +255,55 @@ def test_sfc_coverage_limits_are_targeted(tmp_path: Path, fixture_workspace: Pat
     assert any("sfc_nodes" in limit for limit in sfc_slice["limits"])
     assert any("sfc_nodes" in limit for limit in sfc_context["limits"])
     assert "limits" not in rll_slice
+
+
+def test_get_sfc_chart_requires_explicit_variant_when_multiple_sfc_contents(tmp_path: Path):
+    source = tmp_path / "sfc_variants.L5X"
+    source.write_text(_sfc_variant_fixture(), encoding="utf-8")
+    workspace = tmp_path / "sfc_variants.logix"
+    ingest_l5x(source, workspace)
+    server = create_server(workspace)
+
+    ambiguous = _json_call(server, "get_sfc_chart", {"program": "MainProgram", "routine": "Seq"})
+    assert ambiguous["status"] == "needs_variant"
+    assert len(ambiguous["variants"]) == 2
+
+    pending = _json_call(
+        server,
+        "get_sfc_chart",
+        {"program": "MainProgram", "routine": "Seq", "variant": "Pending"},
+    )
+    assert pending["found"] is True
+    assert pending["counts"] == {"nodes": 2, "links": 1, "branches": 0, "legs": 0}
+    assert pending["charts"][0]["online_edit_type"] == "Pending"
+    assert {node["operand"] for node in pending["nodes"]} == {"PendingStep", "PendingTran"}
+
+    chart_id = pending["charts"][0]["chart_id"]
+    sliced = get_routine_slice(workspace, program="MainProgram", routine="Seq", chart_id=chart_id)
+    assert sliced["items"][0]["chart_id"] == chart_id
+
+
+def test_get_source_fragment_summary_hides_raw_and_full_can_truncate(tmp_path: Path):
+    source = tmp_path / "source_fragments.L5X"
+    source.write_text(_source_fragment_l5x(), encoding="utf-8")
+    workspace = tmp_path / "source_fragments.logix"
+    ingest_l5x(source, workspace)
+    fragment = next(row for row in read_jsonl(workspace, "source_fragments.jsonl") if row["element"] == "MessageParameters")
+    server = create_server(workspace)
+
+    summary = _json_call(server, "get_source_fragment", {"anchor": fragment["anchor"]})
+    assert summary["found"] is True
+    assert summary["raw_available"] is True
+    assert "raw_xml" not in summary
+
+    full = _json_call(
+        server,
+        "get_source_fragment",
+        {"anchor": fragment["anchor"], "detail": "full", "max_bytes": 40},
+    )
+    assert full["found"] is True
+    assert full["raw_truncated"] is True
+    assert len(full["raw_xml"].encode("utf-8")) <= 40
 
 
 def test_envelope_reports_totals_and_truncation():

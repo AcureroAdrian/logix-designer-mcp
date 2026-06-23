@@ -26,7 +26,7 @@ import sqlite3
 # Bump whenever the SQLite schema changes in a way that requires re-ingesting.
 # The ingest step stamps this into ``PRAGMA user_version``; ``connect`` rejects
 # workspaces built with a different version instead of returning wrong results.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class WorkspaceSchemaError(RuntimeError):
@@ -138,8 +138,11 @@ def routine_context(
             "xrefs": _rows(conn.execute("SELECT json FROM xrefs WHERE routine = ?", (rid,))),
             "fbd_nodes": _dataset_filter(conn, "fbd_nodes", "routine_id", rid),
             "fbd_wires": _dataset_filter(conn, "fbd_wires", "routine_id", rid),
+            "sfc_charts": _dataset_filter(conn, "sfc_charts", "routine_id", rid),
             "sfc_nodes": _dataset_filter(conn, "sfc_nodes", "routine_id", rid),
             "sfc_links": _dataset_filter(conn, "sfc_links", "routine_id", rid),
+            "sfc_branches": _dataset_filter(conn, "sfc_branches", "routine_id", rid),
+            "sfc_legs": _dataset_filter(conn, "sfc_legs", "routine_id", rid),
         }
 
 

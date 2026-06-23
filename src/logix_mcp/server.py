@@ -50,7 +50,7 @@ from .workspace import (
 
 SUMMARY_TEXT_LIMIT = 200
 RESULT_SPILL_THRESHOLD = 50_000
-_BULKY_FIELDS = {"body", "attributes"}
+_BULKY_FIELDS = {"body", "attributes", "raw_xml"}
 
 # Per-kind whitelists keep listing rows lean enough that a default page of 200
 # stays within the context budget; kinds without a whitelist fall back to the
@@ -62,6 +62,11 @@ _KIND_SUMMARY_KEYS = {
     "module": ("id", "kind", "name", "catalog_number", "parent_module", "slot", "address", "inhibited", "major_fault"),
     "program": ("id", "kind", "name", "main_routine"),
     "routine": ("id", "kind", "name", "program", "owner", "language", "unit_count", "fbd_node_count", "sfc_node_count"),
+    "sfc_chart": ("id", "chart_id", "kind", "routine", "program", "online_edit_type", "content_index", "node_count", "link_count", "branch_count", "leg_count"),
+    "engineering_unit": ("id", "kind", "module", "tag", "operand", "point", "engineering_unit"),
+    "message_parameters": ("id", "kind", "tag_name", "message_type", "service_code", "connection_path", "local_element", "destination_tag"),
+    "module_profile_fragment": ("id", "kind", "module", "catalog_number", "vendor", "cat_num", "instance_application_path", "format"),
+    "source_fragment": ("id", "kind", "element", "owner_id", "coverage_mode", "source_hash", "summary", "byte_size"),
 }
 
 
@@ -230,14 +235,16 @@ def tag_context_view(bundle: dict, detail: str) -> tuple[dict, bool]:
     comments = list(bundle.get("comments") or [])
     tag_comments = list(bundle.get("tag_comments") or [])
     data = list(bundle.get("data") or [])
+    message_parameters = list(bundle.get("message_parameters") or [])
     references = list(bundle.get("references") or [])
-    limits = {"summary": (5, 10, 10, 10), "detail": (25, 50, 50, 50)}[detail]
-    comment_limit, tag_comment_limit, data_limit, ref_limit = limits
+    limits = {"summary": (5, 10, 10, 5, 10), "detail": (25, 50, 50, 25, 50)}[detail]
+    comment_limit, tag_comment_limit, data_limit, msg_limit, ref_limit = limits
     truncated = any(
         [
             len(comments) > comment_limit,
             len(tag_comments) > tag_comment_limit,
             len(data) > data_limit,
+            len(message_parameters) > msg_limit,
             len(references) > ref_limit,
         ]
     )
@@ -249,11 +256,13 @@ def tag_context_view(bundle: dict, detail: str) -> tuple[dict, bool]:
                 "comments": len(comments),
                 "tag_comments": len(tag_comments),
                 "data": len(data),
+                "message_parameters": len(message_parameters),
                 "references": len(references),
             },
             "comments": [compact_comment(row) for row in comments[:comment_limit]],
             "tag_comments": [compact_comment(row) for row in tag_comments[:tag_comment_limit]],
             "data_preview": [compact_data(row) for row in data[:data_limit]],
+            "message_parameters": _project_rows(message_parameters, msg_limit),
             "references": _project_rows(references, ref_limit),
             "next_calls": [
                 "get_operand_context(<tag>, detail='summary')",
@@ -291,18 +300,36 @@ def module_context_view(bundle: dict, detail: str) -> tuple[dict, bool]:
     connections = [{key: value for key, value in row.items() if key != "io_tags"} for row in list(bundle.get("connections") or [])]
     io_tags = list(bundle.get("io_tags") or [])
     io_points = list(bundle.get("io_points") or [])
-    limits = {"summary": (10, 10, 20, 50), "detail": (50, 50, 100, 250)}[detail]
-    port_limit, conn_limit, tag_limit, point_limit = limits
-    truncated = len(ports) > port_limit or len(connections) > conn_limit or len(io_tags) > tag_limit or len(io_points) > point_limit
+    engineering_units = list(bundle.get("engineering_units") or [])
+    profile_fragments = list(bundle.get("profile_fragments") or [])
+    limits = {"summary": (10, 10, 20, 50, 25, 25), "detail": (50, 50, 100, 250, 100, 100)}[detail]
+    port_limit, conn_limit, tag_limit, point_limit, unit_limit, profile_limit = limits
+    truncated = (
+        len(ports) > port_limit
+        or len(connections) > conn_limit
+        or len(io_tags) > tag_limit
+        or len(io_points) > point_limit
+        or len(engineering_units) > unit_limit
+        or len(profile_fragments) > profile_limit
+    )
     return (
         {
             "detail": detail,
             "module": summarize_row(bundle.get("module") or {}),
-            "counts": {"ports": len(ports), "connections": len(connections), "io_tags": len(io_tags), "io_points": len(io_points)},
+            "counts": {
+                "ports": len(ports),
+                "connections": len(connections),
+                "io_tags": len(io_tags),
+                "io_points": len(io_points),
+                "engineering_units": len(engineering_units),
+                "profile_fragments": len(profile_fragments),
+            },
             "ports": _project_rows(ports, port_limit),
             "connections": _project_rows(connections, conn_limit),
             "io_tags": _project_rows(io_tags, tag_limit),
             "io_points": _project_rows(io_points, point_limit),
+            "engineering_units": _project_rows(engineering_units, unit_limit),
+            "profile_fragments": _project_rows(profile_fragments, profile_limit),
             "next_calls": ["get_module_context(<module>, detail='full') for embedded connection io_tags"],
         },
         truncated,
@@ -491,13 +518,17 @@ def create_server(workspace: str | Path):
             unit_rows.append(row)
         summary = {
             "routine": summarize_row(result.get("routine") or {}),
-            "counts": {key: len(result.get(key) or []) for key in ("units", "xrefs", "fbd_nodes", "fbd_wires", "sfc_nodes", "sfc_links")},
+            "counts": {
+                key: len(result.get(key) or [])
+                for key in ("units", "xrefs", "fbd_nodes", "fbd_wires", "sfc_charts", "sfc_nodes", "sfc_links", "sfc_branches", "sfc_legs")
+            },
             "units": unit_rows,
             "units_truncated": max(0, len(units) - unit_limit),
             "detail": "summary",
             "next_calls": [
                 "get_routine_slice(..., query=<tag>) for bounded logic",
                 "get_fbd_sheet(..., sheet=<n>) for FBD pseudo-equations",
+                "get_sfc_chart(..., variant=<OnlineEditType>) for SFC chart variants",
                 "get_routine_context(..., detail='full') for raw rows",
             ],
         }
@@ -604,6 +635,109 @@ def create_server(workspace: str | Path):
         return analysis_search_project(workspace_path, query, kinds=kinds, scope=scope, limit=limit, offset=offset)
 
     @_tool()
+    def get_sfc_chart(
+        program: str | None = None,
+        routine: str | None = None,
+        routine_id: str | None = None,
+        chart_id: str | None = None,
+        variant: str | None = None,
+        detail: str = "summary",
+        limit: int = 100,
+        offset: int = 0,
+        spill: bool = False,
+    ) -> dict:
+        """Return one SFC chart variant without silently merging OnlineEdit charts."""
+
+        detail_error = validate_detail(detail)
+        if detail_error:
+            return detail_error
+        context = workspace_get_routine_context(workspace_path, program, routine, routine_id)
+        if context is None:
+            return not_found(workspace_path, "routine", routine or routine_id or program or "")
+        charts = list(context.get("sfc_charts") or [])
+        if chart_id:
+            charts = [row for row in charts if row.get("id") == chart_id or row.get("chart_id") == chart_id]
+        if variant and variant.lower() != "all":
+            charts = [row for row in charts if str(row.get("online_edit_type") or "").lower() == variant.lower()]
+        if not charts:
+            return {
+                "found": False,
+                "routine": summarize_row(context.get("routine") or {}),
+                "variants": _project_rows(list(context.get("sfc_charts") or []), 25),
+                "hint": "Pass chart_id or variant when the routine has SFC chart variants.",
+            }
+        if len(charts) > 1 and not (chart_id or variant):
+            return {
+                "found": True,
+                "status": "needs_variant",
+                "routine": summarize_row(context.get("routine") or {}),
+                "variants": _project_rows(charts, 25),
+                "limits": ["Multiple SFCContent variants are present; pass chart_id, variant, or variant='all' explicitly."],
+            }
+        selected_charts = charts if (variant or "").lower() == "all" else charts[:1]
+        selected_ids = {row.get("id") or row.get("chart_id") for row in selected_charts}
+        nodes = [row for row in context.get("sfc_nodes") or [] if row.get("chart_id") in selected_ids or row.get("unit_id") in selected_ids]
+        links = [row for row in context.get("sfc_links") or [] if row.get("chart_id") in selected_ids or row.get("unit_id") in selected_ids]
+        branches = [row for row in context.get("sfc_branches") or [] if row.get("chart_id") in selected_ids or row.get("unit_id") in selected_ids]
+        legs = [row for row in context.get("sfc_legs") or [] if row.get("chart_id") in selected_ids or row.get("unit_id") in selected_ids]
+        limit = max(int(limit or 0), 0)
+        offset = max(int(offset or 0), 0)
+        if detail == "full":
+            result = {
+                "found": True,
+                "detail": "full",
+                "routine": context.get("routine"),
+                "charts": selected_charts,
+                "nodes": nodes,
+                "links": links,
+                "branches": branches,
+                "legs": legs,
+            }
+            return finish_result(result, workspace=workspace_path, tool="get_sfc_chart", truncated=False, spill=spill)
+        page_nodes = nodes[offset : offset + limit]
+        result = {
+            "found": True,
+            "detail": detail,
+            "routine": summarize_row(context.get("routine") or {}),
+            "charts": _project_rows(selected_charts, 25),
+            "counts": {"nodes": len(nodes), "links": len(links), "branches": len(branches), "legs": len(legs)},
+            "nodes": _project_rows(page_nodes, limit),
+            "links": _project_rows(links[: min(limit, 100)], min(limit, 100)),
+            "branches": _project_rows(branches[: min(limit, 100)], min(limit, 100)),
+            "legs": _project_rows(legs[: min(limit, 100)], min(limit, 100)),
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(page_nodes) < len(nodes),
+            "next_calls": ["get_sfc_chart(..., detail='full', chart_id=<chart_id>) for raw IR"],
+        }
+        return finish_result(result, workspace=workspace_path, tool="get_sfc_chart", truncated=result["has_more"], spill=spill)
+
+    @_tool()
+    def get_source_fragment(anchor: str, detail: str = "summary", max_bytes: int = 20_000, spill: bool = False) -> dict:
+        """Return a source XML fragment by allowlisted IR anchor."""
+
+        detail_error = validate_detail(detail)
+        if detail_error:
+            return detail_error
+        rows = [row for row in read_jsonl(workspace_path, "source_fragments.jsonl") if row.get("anchor") == anchor or row.get("id") == anchor]
+        if not rows:
+            return {"found": False, "anchor": anchor, "hint": "Use anchors emitted by coverage_report, get_module_context, get_tag_context, or search_project."}
+        row = dict(rows[0])
+        raw_xml = str(row.get("raw_xml") or "")
+        if detail == "full":
+            max_bytes = max(int(max_bytes or 0), 0)
+            encoded = raw_xml.encode("utf-8")
+            truncated = len(encoded) > max_bytes if max_bytes else False
+            if max_bytes and truncated:
+                raw_xml = encoded[:max_bytes].decode("utf-8", errors="ignore")
+            result = {key: value for key, value in row.items() if key != "raw_xml"}
+            result.update({"found": True, "detail": "full", "raw_xml": raw_xml, "raw_truncated": truncated})
+            return finish_result(result, workspace=workspace_path, tool="get_source_fragment", truncated=truncated, spill=spill)
+        result = summarize_row(row)
+        result.update({"found": True, "detail": detail, "anchor": row.get("anchor"), "raw_available": bool(raw_xml)})
+        return finish_result(result, workspace=workspace_path, tool="get_source_fragment", truncated=False, spill=spill)
+
+    @_tool()
     def exists(query: str, kinds: str | None = None, scope: str | None = None) -> dict:
         """Cheap existence check over project search."""
 
@@ -622,13 +756,14 @@ def create_server(workspace: str | Path):
         routine_id: str | None = None,
         sheet: str | None = None,
         unit_id: str | None = None,
+        chart_id: str | None = None,
         query: str | None = None,
         before: int = 1,
         after: int = 1,
     ) -> dict:
         """Return a bounded routine slice by sheet/unit/query."""
 
-        return analysis_get_routine_slice(workspace_path, program, routine, routine_id, sheet, unit_id, query, before, after)
+        return analysis_get_routine_slice(workspace_path, program, routine, routine_id, sheet, unit_id, chart_id, query, before, after)
 
     @_tool()
     def get_fbd_sheet(
@@ -751,6 +886,74 @@ def create_server(workspace: str | Path):
         """
 
         return run_diagnostics_impl(workspace_path, rules=rules, severity=severity, limit=limit)
+
+    @_tool()
+    def sdk_status() -> dict:
+        """Return optional SDK availability and the exact allowlisted registry."""
+
+        from . import sdk_adapter
+
+        return {"status": sdk_adapter.sdk_status(), "registry": sdk_adapter.validate_sdk_registry()}
+
+    @_tool()
+    def runtime_evidence_summary() -> dict:
+        """Summarize volatile runtime evidence stored outside canonical IR."""
+
+        from . import sdk_adapter
+
+        return sdk_adapter.runtime_evidence_summary(workspace_path)
+
+    @_tool()
+    def list_runtime_evidence(
+        tag: str | None = None,
+        scope: str | None = None,
+        freshness: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """List compact runtime evidence rows from the volatile evidence store."""
+
+        from . import sdk_adapter
+
+        return sdk_adapter.query_runtime_evidence(
+            workspace_path,
+            tag=tag,
+            scope=scope,
+            freshness=freshness,
+            limit=limit,
+            offset=offset,
+        )
+
+    @_tool()
+    def simulate_runtime_read_preview(
+        tags: str,
+        samples: int = 5,
+        interval_seconds: float = 1.0,
+        data_type: str = "REAL",
+        signal: str = "sine",
+        amplitude: float = 100.0,
+        offset: float = 0.0,
+        period_samples: int = 20,
+        scope: str | None = None,
+    ) -> dict:
+        """Preview simulated SDK-style runtime reads without writing evidence."""
+
+        from . import sdk_adapter
+
+        tag_list = [item.strip() for item in tags.split(",") if item.strip()]
+        return sdk_adapter.simulate_runtime_tag_stream(
+            workspace_path,
+            tag_list,
+            samples=samples,
+            interval_seconds=interval_seconds,
+            data_type=data_type,
+            signal=signal,
+            amplitude=amplitude,
+            offset=offset,
+            period_samples=period_samples,
+            scope=scope,
+            persist=False,
+        )
 
     return mcp
 

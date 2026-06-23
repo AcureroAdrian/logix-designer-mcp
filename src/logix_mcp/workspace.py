@@ -180,6 +180,12 @@ def get_entity(workspace: str | Path, entity_id: str) -> dict | None:
         "modules.jsonl",
         "module_io_points.jsonl",
         "alarms.jsonl",
+        "sfc_charts.jsonl",
+        "source_fragments.jsonl",
+        "engineering_units.jsonl",
+        "message_parameters.jsonl",
+        "module_profile_fragments.jsonl",
+        "program_children.jsonl",
     ]:
         for row in read_jsonl(workspace, file_name):
             if row.get("id") == entity_id:
@@ -198,6 +204,12 @@ def search_entities(workspace: str | Path, query: str, limit: int = 50) -> list[
         "module_io_points.jsonl",
         "alarms.jsonl",
         "messages.jsonl",
+        "sfc_charts.jsonl",
+        "source_fragments.jsonl",
+        "engineering_units.jsonl",
+        "message_parameters.jsonl",
+        "module_profile_fragments.jsonl",
+        "program_children.jsonl",
     ]:
         for row in read_jsonl(workspace, file_name):
             text = _search_text(row)
@@ -231,8 +243,11 @@ def get_routine_context(workspace: str | Path, program: str | None = None, routi
         "xrefs": [row for row in read_jsonl(workspace, "xrefs.jsonl") if row.get("routine") == rid],
         "fbd_nodes": [row for row in read_jsonl(workspace, "fbd_nodes.jsonl") if row.get("routine_id") == rid],
         "fbd_wires": [row for row in read_jsonl(workspace, "fbd_wires.jsonl") if row.get("routine_id") == rid],
+        "sfc_charts": [row for row in read_jsonl(workspace, "sfc_charts.jsonl") if row.get("routine_id") == rid],
         "sfc_nodes": [row for row in read_jsonl(workspace, "sfc_nodes.jsonl") if row.get("routine_id") == rid],
         "sfc_links": [row for row in read_jsonl(workspace, "sfc_links.jsonl") if row.get("routine_id") == rid],
+        "sfc_branches": [row for row in read_jsonl(workspace, "sfc_branches.jsonl") if row.get("routine_id") == rid],
+        "sfc_legs": [row for row in read_jsonl(workspace, "sfc_legs.jsonl") if row.get("routine_id") == rid],
     }
 
 
@@ -248,6 +263,8 @@ def get_module_bundle(workspace: str | Path, module: str) -> dict | None:
         "connections": [row for row in read_jsonl(workspace, "module_connections.jsonl") if row.get("module") == name],
         "io_tags": [row for row in read_jsonl(workspace, "module_io_tags.jsonl") if row.get("module") == name],
         "io_points": [row for row in read_jsonl(workspace, "module_io_points.jsonl") if row.get("module") == name],
+        "engineering_units": [row for row in read_jsonl(workspace, "engineering_units.jsonl") if row.get("module") == name],
+        "profile_fragments": [row for row in read_jsonl(workspace, "module_profile_fragments.jsonl") if row.get("module") == name],
     }
 
 
@@ -261,6 +278,10 @@ def get_tag_bundle(workspace: str | Path, name: str, scope: str | None = None) -
             "comments": db.comments_for_target(workspace, name),
             "tag_comments": db.tag_comments(workspace, name),
             "data": db.tag_data(workspace, name),
+            "message_parameters": [
+                row for row in db.dataset(workspace, "message_parameters")
+                if row.get("tag_name") == name
+            ],
             "references": find_references(workspace, name, limit=500),
         }
     return {
@@ -276,6 +297,10 @@ def get_tag_bundle(workspace: str | Path, name: str, scope: str | None = None) -
         "data": [
             row for row in read_jsonl(workspace, "tag_data.jsonl")
             if (row.get("owner") or {}).get("name") == name
+        ],
+        "message_parameters": [
+            row for row in read_jsonl(workspace, "message_parameters.jsonl")
+            if row.get("tag_name") == name
         ],
         "references": find_references(workspace, name, limit=500),
     }
@@ -446,8 +471,11 @@ def _jsonl_datasets(project: dict) -> dict[str, list[dict]]:
         "routine_units": project["routine_units"],
         "fbd_nodes": project["fbd_nodes"],
         "fbd_wires": project["fbd_wires"],
+        "sfc_charts": project["sfc_charts"],
         "sfc_nodes": project["sfc_nodes"],
         "sfc_links": project["sfc_links"],
+        "sfc_branches": project["sfc_branches"],
+        "sfc_legs": project["sfc_legs"],
         "modules": project["modules"],
         "module_ports": project["module_ports"],
         "module_connections": project["module_connections"],
@@ -460,6 +488,12 @@ def _jsonl_datasets(project: dict) -> dict[str, list[dict]]:
         "alarms": project["alarms"],
         "messages": project["messages"],
         "produce_consume": project["produce_consume"],
+        "source_fragments": project["source_fragments"],
+        "controller_metadata": project["controller_metadata"],
+        "engineering_units": project["engineering_units"],
+        "message_parameters": project["message_parameters"],
+        "module_profile_fragments": project["module_profile_fragments"],
+        "program_children": project["program_children"],
         "xrefs": project["xrefs"],
         "edges": project["edges"],
         "source_nodes": project["source_nodes"],
@@ -569,11 +603,20 @@ def _coverage_md(coverage: dict) -> str:
     lines = ["# Extraction Coverage", "", "## Quality Counts", ""]
     for key, value in coverage.get("counts", {}).items():
         lines.append(f"- {key}: {value}")
-    lines.extend(["", "## Surfaces", "", "| Surface | Priority | Source | Covered | Missing |", "| --- | --- | ---: | ---: | ---: |"])
+    lines.extend(
+        [
+            "",
+            "## Surfaces",
+            "",
+            "| Surface | Priority | Source | Covered | Semantic | Raw | Missing |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
     for name, surface in coverage.get("surfaces", {}).items():
         lines.append(
             f"| {name} | {surface.get('priority')} | {surface.get('source_count', 0)} | "
-            f"{surface.get('covered_count', 0)} | {surface.get('missing_count', 0)} |"
+            f"{surface.get('covered_count', 0)} | {surface.get('semantic_covered_count', '')} | "
+            f"{surface.get('raw_preserved_count', '')} | {surface.get('missing_count', 0)} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -610,6 +653,7 @@ def _routine_md(routine: dict, project: dict) -> str:
     units = [row for row in project["routine_units"] if row.get("routine_id") == rid]
     fbd_nodes = [row for row in project["fbd_nodes"] if row.get("routine_id") == rid]
     fbd_wires = [row for row in project["fbd_wires"] if row.get("routine_id") == rid]
+    sfc_charts = [row for row in project["sfc_charts"] if row.get("routine_id") == rid]
     sfc_nodes = [row for row in project["sfc_nodes"] if row.get("routine_id") == rid]
     sfc_links = [row for row in project["sfc_links"] if row.get("routine_id") == rid]
     refs = [row for row in project["xrefs"] if row.get("routine") == rid]
@@ -645,7 +689,7 @@ def _routine_md(routine: dict, project: dict) -> str:
     elif language == "FBD":
         lines.extend(_fbd_units_md(units, fbd_nodes, fbd_wires))
     elif language == "SFC":
-        lines.extend(_sfc_units_md(sfc_nodes, sfc_links))
+        lines.extend(_sfc_units_md(sfc_nodes, sfc_links, sfc_charts))
     else:
         lines.extend(["## Body", "", "```text", routine.get("body") or "", "```", ""])
 
@@ -708,13 +752,21 @@ def _fbd_units_md(units: list[dict], nodes: list[dict], wires: list[dict]) -> li
     return lines
 
 
-def _sfc_units_md(nodes: list[dict], links: list[dict]) -> list[str]:
+def _sfc_units_md(nodes: list[dict], links: list[dict], charts: list[dict] | None = None) -> list[str]:
     lines = ["## Sequential Function Chart", "", f"- Nodes: {len(nodes)}", f"- Directed links: {len(links)}", ""]
+    if charts:
+        lines.extend(["### Charts", "", "| Chart | Variant | Nodes | Links | Branches | Legs |", "| --- | --- | ---: | ---: | ---: | ---: |"])
+        for chart in charts:
+            lines.append(
+                f"| {chart.get('id') or ''} | {chart.get('online_edit_type') or ''} | {chart.get('node_count', 0)} | "
+                f"{chart.get('link_count', 0)} | {chart.get('branch_count', 0)} | {chart.get('leg_count', 0)} |"
+            )
+        lines.append("")
     if nodes:
-        lines.extend(["| ID | Type | Operand | Initial/Qualifier |", "| --- | --- | --- | --- |"])
+        lines.extend(["| Chart | ID | Type | Operand | Initial/Qualifier |", "| --- | --- | --- | --- | --- |"])
         for node in nodes:
             lines.append(
-                f"| {node.get('node_id') or ''} | {node.get('node_type') or ''} | {node.get('operand') or ''} | "
+                f"| {node.get('chart_id') or node.get('unit_id') or ''} | {node.get('node_id') or ''} | {node.get('node_type') or ''} | {node.get('operand') or ''} | "
                 f"{node.get('initial_step') or node.get('qualifier') or ''} |"
             )
         lines.append("")
@@ -859,6 +911,16 @@ def _write_sqlite(path: Path, project: dict) -> None:
         conn.execute("CREATE TABLE module_connections (module TEXT, kind TEXT, name TEXT, type TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE module_io_tags (id TEXT, module TEXT, role TEXT, direction TEXT, data_type TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE module_io_points (module TEXT, role TEXT, direction TEXT, operand TEXT, point INTEGER, description TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE sfc_charts (id TEXT PRIMARY KEY, routine_id TEXT, program TEXT, routine TEXT, online_edit_type TEXT, content_index INTEGER, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE sfc_nodes (id TEXT PRIMARY KEY, routine_id TEXT, chart_id TEXT, node_type TEXT, node_id TEXT, operand TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE sfc_links (id TEXT PRIMARY KEY, routine_id TEXT, chart_id TEXT, from_id TEXT, to_id TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE sfc_branches (id TEXT PRIMARY KEY, routine_id TEXT, chart_id TEXT, branch_id TEXT, branch_type TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE sfc_legs (id TEXT PRIMARY KEY, routine_id TEXT, chart_id TEXT, branch_id TEXT, leg_id TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE source_fragments (anchor TEXT PRIMARY KEY, element TEXT, owner_id TEXT, coverage_mode TEXT, source_hash TEXT, summary TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE engineering_units (id TEXT PRIMARY KEY, module TEXT, tag TEXT, operand TEXT, point INTEGER, engineering_unit TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE message_parameters (id TEXT PRIMARY KEY, tag_name TEXT, message_type TEXT, service_code TEXT, connection_path TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE module_profile_fragments (id TEXT PRIMARY KEY, module TEXT, catalog_number TEXT, vendor TEXT, cat_num TEXT, instance_application_path TEXT, json TEXT NOT NULL)")
+        conn.execute("CREATE TABLE program_children (id TEXT PRIMARY KEY, parent_program TEXT, child_program TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE edges (kind TEXT, source TEXT, target TEXT, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE coverage_checks (name TEXT PRIMARY KEY, priority TEXT, source_count INTEGER, covered_count INTEGER, missing_count INTEGER, json TEXT NOT NULL)")
         conn.execute("CREATE TABLE ir_rows (dataset TEXT, id TEXT, kind TEXT, name TEXT, json TEXT NOT NULL)")
@@ -901,6 +963,18 @@ def _create_sqlite_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX idx_alarms_tag ON alarms(tag_name)",
         "CREATE INDEX idx_modules_parent ON modules(parent_module)",
         "CREATE INDEX idx_module_io_points_module ON module_io_points(module)",
+        "CREATE INDEX idx_sfc_charts_routine ON sfc_charts(routine_id)",
+        "CREATE INDEX idx_sfc_charts_variant ON sfc_charts(online_edit_type)",
+        "CREATE INDEX idx_sfc_nodes_chart ON sfc_nodes(chart_id)",
+        "CREATE INDEX idx_sfc_links_chart ON sfc_links(chart_id)",
+        "CREATE INDEX idx_sfc_branches_chart ON sfc_branches(chart_id)",
+        "CREATE INDEX idx_sfc_legs_chart ON sfc_legs(chart_id)",
+        "CREATE INDEX idx_source_fragments_anchor ON source_fragments(anchor)",
+        "CREATE INDEX idx_source_fragments_element ON source_fragments(element)",
+        "CREATE INDEX idx_engineering_units_module ON engineering_units(module)",
+        "CREATE INDEX idx_message_parameters_tag ON message_parameters(tag_name)",
+        "CREATE INDEX idx_module_profile_fragments_module ON module_profile_fragments(module)",
+        "CREATE INDEX idx_program_children_parent ON program_children(parent_program)",
         "CREATE INDEX idx_ir_rows_dataset ON ir_rows(dataset)",
         "CREATE INDEX idx_ir_rows_id ON ir_rows(id)",
     ]:
@@ -978,6 +1052,64 @@ def _insert_sqlite_rows(conn: sqlite3.Connection, project: dict) -> None:
             (row.get("module"), row.get("role"), row.get("direction"), row.get("operand"), row.get("point"), row.get("description"), _json(row)),
         )
         _insert_search(conn, "module_io_point", row.get("operand"), row.get("module"), _search_text(row))
+    for chart in project.get("sfc_charts", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO sfc_charts(id, routine_id, program, routine, online_edit_type, content_index, json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chart.get("id"), chart.get("routine_id"), chart.get("program"), chart.get("routine"), chart.get("online_edit_type"), chart.get("content_index"), _json(chart)),
+        )
+        _insert_search(conn, "sfc_chart", chart.get("routine"), chart.get("program") or chart.get("owner"), _search_text(chart))
+    for node in project.get("sfc_nodes", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO sfc_nodes(id, routine_id, chart_id, node_type, node_id, operand, json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (node.get("id"), node.get("routine_id"), node.get("chart_id"), node.get("node_type"), node.get("node_id"), node.get("operand"), _json(node)),
+        )
+        _insert_search(conn, "sfc_node", node.get("operand") or node.get("node_id"), node.get("program") or node.get("owner"), _search_text(node))
+    for link in project.get("sfc_links", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO sfc_links(id, routine_id, chart_id, from_id, to_id, json) VALUES (?, ?, ?, ?, ?, ?)",
+            (link.get("id"), link.get("routine_id"), link.get("chart_id"), link.get("from_id"), link.get("to_id"), _json(link)),
+        )
+    for branch in project.get("sfc_branches", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO sfc_branches(id, routine_id, chart_id, branch_id, branch_type, json) VALUES (?, ?, ?, ?, ?, ?)",
+            (branch.get("id"), branch.get("routine_id"), branch.get("chart_id"), branch.get("branch_id"), branch.get("branch_type"), _json(branch)),
+        )
+        _insert_search(conn, "sfc_branch", branch.get("branch_id"), branch.get("program") or branch.get("owner"), _search_text(branch))
+    for leg in project.get("sfc_legs", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO sfc_legs(id, routine_id, chart_id, branch_id, leg_id, json) VALUES (?, ?, ?, ?, ?, ?)",
+            (leg.get("id"), leg.get("routine_id"), leg.get("chart_id"), leg.get("branch_id"), leg.get("leg_id"), _json(leg)),
+        )
+    for fragment in project.get("source_fragments", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO source_fragments(anchor, element, owner_id, coverage_mode, source_hash, summary, json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (fragment.get("anchor"), fragment.get("element"), fragment.get("owner_id"), fragment.get("coverage_mode"), fragment.get("source_hash"), fragment.get("summary"), _json(fragment)),
+        )
+        _insert_search(conn, "source_fragment", fragment.get("element"), fragment.get("owner_id"), _search_text(fragment))
+    for row in project.get("engineering_units", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO engineering_units(id, module, tag, operand, point, engineering_unit, json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row.get("id"), row.get("module"), row.get("tag"), row.get("operand"), row.get("point"), row.get("engineering_unit"), _json(row)),
+        )
+        _insert_search(conn, "engineering_unit", row.get("engineering_unit") or row.get("operand"), row.get("module"), _search_text(row))
+    for row in project.get("message_parameters", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO message_parameters(id, tag_name, message_type, service_code, connection_path, json) VALUES (?, ?, ?, ?, ?, ?)",
+            (row.get("id"), row.get("tag_name"), row.get("message_type"), row.get("service_code"), row.get("connection_path"), _json(row)),
+        )
+        _insert_search(conn, "message_parameters", row.get("tag_name"), row.get("connection_path"), _search_text(row))
+    for row in project.get("module_profile_fragments", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO module_profile_fragments(id, module, catalog_number, vendor, cat_num, instance_application_path, json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row.get("id"), row.get("module"), row.get("catalog_number"), row.get("vendor"), row.get("cat_num"), row.get("instance_application_path"), _json(row)),
+        )
+        _insert_search(conn, "module_profile_fragment", row.get("module"), row.get("catalog_number"), _search_text(row))
+    for row in project.get("program_children", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO program_children(id, parent_program, child_program, json) VALUES (?, ?, ?, ?)",
+            (row.get("id"), row.get("parent_program"), row.get("child_program"), _json(row)),
+        )
+        _insert_search(conn, "program_child", row.get("child_program"), row.get("parent_program"), _search_text(row))
     for edge in project["edges"]:
         conn.execute("INSERT INTO edges(kind, source, target, json) VALUES (?, ?, ?, ?)", (edge.get("kind"), edge.get("from"), edge.get("to"), _json(edge)))
     for name, surface in project["coverage"]["surfaces"].items():
@@ -1009,7 +1141,33 @@ def _json(row: dict) -> str:
 
 def _search_text(row: dict) -> str:
     values = []
-    for key in ["name", "id", "description", "text", "data_type", "alias_for", "catalog_number", "operand", "tag_name", "raw_text"]:
+    for key in [
+        "name",
+        "id",
+        "description",
+        "text",
+        "summary",
+        "element",
+        "data_type",
+        "alias_for",
+        "catalog_number",
+        "module",
+        "vendor",
+        "cat_num",
+        "instance_application_path",
+        "engineering_unit",
+        "operand",
+        "tag_name",
+        "message_type",
+        "connection_path",
+        "local_element",
+        "destination_tag",
+        "parent_program",
+        "child_program",
+        "online_edit_type",
+        "node_type",
+        "raw_text",
+    ]:
         if row.get(key):
             values.append(str(row[key]))
     if row.get("comments"):
